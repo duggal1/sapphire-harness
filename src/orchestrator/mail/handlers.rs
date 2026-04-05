@@ -264,48 +264,7 @@ pub fn handle_mail_directive(
         ),
     )?;
 
-    // Deliver to primary recipient — use nudge queue for non-destructive delivery
-    if let Some(recipient) = active_sessions.get(&recipient_session_id) {
-        let delivery_mode = derive_delivery_mode(&directive.priority, &directive.delivery_mode);
-        if delivery_mode == "interrupt" {
-            // Direct PTY injection — only for urgent/critical priority
-            let mail_prompt = render_mail_for_delivery(
-                message_id, &thread_id, &sender_name, &directive,
-                &cc_session_ids, ack_required, is_urgent,
-            );
-            let _ = recipient.runtime.send_prompt(&mail_prompt);
-        } else {
-            // Queue-based delivery — write to filesystem, drain at next turn boundary
-            let nudge = nudge_from_mail(&directive, &sender_name);
-            if let Err(e) = nudge_enqueue(state_dir, &recipient.record.id.to_string(), nudge) {
-                // Fallback to direct injection if queue fails
-                tracing::warn!("nudge enqueue failed, falling back to direct injection: {e}");
-                let mail_prompt = render_mail_for_delivery(
-                    message_id, &thread_id, &sender_name, &directive,
-                    &cc_session_ids, ack_required, is_urgent,
-                );
-                let _ = recipient.runtime.send_prompt(&mail_prompt);
-            }
-        }
-    }
-
-    // Notify CC recipients
-    for cc_id in &cc_session_ids {
-        if let Some(cc_session) = active_sessions.get(cc_id) {
-            let cc_notice = render_cc_notice(&thread_id, &sender_name, &recipient_name, &directive);
-            let _ = cc_session.runtime.send_prompt(&cc_notice);
-        }
-    }
-
-    let _ = store.update_worker_summary(
-        recipient_session_id,
-        &format!(
-            "mail inbox: {} [{}] ({})",
-            directive.subject, normalized_type, directive.priority
-        ),
-    );
-
-    // Track pending mail for ack timeout
+    // Track pending mail for ack timeout — insert BEFORE delivery to ensure timeout invariant
     if ack_required {
         pending_mail.insert(
             message_id,
@@ -332,6 +291,47 @@ pub fn handle_mail_directive(
             },
         );
     }
+
+    // Deliver to primary recipient — use nudge queue for non-destructive delivery
+    if let Some(recipient) = active_sessions.get(&recipient_session_id) {
+        let delivery_mode = derive_delivery_mode(&directive.priority, &directive.delivery_mode);
+        if delivery_mode == "interrupt" {
+            // Direct PTY injection — only for urgent/critical priority
+            let mail_prompt = render_mail_for_delivery(
+                message_id, &thread_id, &sender_name, &directive,
+                &cc_session_ids, ack_required, is_urgent,
+            );
+            let _ = recipient.runtime.send_prompt(&mail_prompt);
+        } else {
+            // Queue-based delivery — write to filesystem, drain at next turn boundary
+            let nudge = nudge_from_mail(&directive, &sender_name);
+            if let Err(e) = nudge_enqueue(state_dir, &recipient.record.id.to_string(), nudge) {
+                // Fallback to direct injection if queue fails
+                tracing::error!("nudge enqueue failed, falling back to direct injection: {e}");
+                let mail_prompt = render_mail_for_delivery(
+                    message_id, &thread_id, &sender_name, &directive,
+                    &cc_session_ids, ack_required, is_urgent,
+                );
+                let _ = recipient.runtime.send_prompt(&mail_prompt);
+            }
+        }
+    }
+
+    // Notify CC recipients
+    for cc_id in &cc_session_ids {
+        if let Some(cc_session) = active_sessions.get(cc_id) {
+            let cc_notice = render_cc_notice(&thread_id, &sender_name, &recipient_name, &directive);
+            let _ = cc_session.runtime.send_prompt(&cc_notice);
+        }
+    }
+
+    let _ = store.update_worker_summary(
+        recipient_session_id,
+        &format!(
+            "mail inbox: {} [{}] ({})",
+            directive.subject, normalized_type, directive.priority
+        ),
+    );
 
     // Reply chain: mark original as responded
     if let Some(reply_to) = directive.reply_to.as_deref().and_then(parse_mail_id) {
