@@ -307,31 +307,48 @@ fn looks_like_git_url(url: &str) -> bool {
 
 /// Initialize a git repository and add a remote.
 pub fn init_git_repo(repo: &Path, remote_url: &str) -> Result<()> {
-    let status = Command::new("git")
-        .arg("-c")
-        .arg("init.defaultBranch=main")
-        .arg("init")
-        .arg("-q")
-        .current_dir(repo)
-        .status()
-        .context("failed to run git init")?;
-    if !status.success() {
-        anyhow::bail!("git init failed");
-    }
+    run_git_command(
+        repo,
+        &[
+            "-c",
+            "init.defaultBranch=main",
+            "init",
+            "-q",
+        ],
+        "git init failed",
+    )?;
 
-    let status = Command::new("git")
-        .arg("remote")
-        .arg("add")
-        .arg("origin")
-        .arg(remote_url)
-        .current_dir(repo)
-        .status()
-        .context("failed to add remote")?;
-    if !status.success() {
-        anyhow::bail!("git remote add failed");
-    }
+    run_git_command(
+        repo,
+        &["remote", "add", "origin", remote_url],
+        "git remote add failed",
+    )?;
 
     Ok(())
+}
+
+fn run_git_command(repo: &Path, args: &[&str], failure_message: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "git command exited unsuccessfully".to_owned()
+    };
+
+    anyhow::bail!("{failure_message}: {detail}");
 }
 
 // ─── Commit Lock (Prevent Overlapping Commits) ──────────────────────────

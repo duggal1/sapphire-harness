@@ -135,7 +135,6 @@ impl DashboardDataSource {
         };
 
         let workers = self.store.load_workers(mission.id)?;
-        let replay = self.store.recent_replay_entries(mission.id, 20)?;
         let supervisor_summary = self.store.latest_supervisor_summary(mission.id)?;
         let control_status = fs::read_to_string(&self.control_status_path).ok();
 
@@ -171,24 +170,7 @@ impl DashboardDataSource {
         // Parse watchdog stats from control status file
         let watchdog = parse_watchdog_stats(control_status.as_deref());
 
-        // Build clean live log entries from replay events — no JSON blobs
-        let mut live_log: Vec<LogEntry> = replay
-            .iter()
-            .filter(|entry| is_operator_event_kind(&entry.kind))
-            .filter_map(|entry| {
-                let message = clean_event_body(&entry.kind, &entry.body);
-                if message.is_empty() || message == "output" {
-                    return None;
-                }
-                Some(LogEntry {
-                    ts: entry.created_at.format("%H:%M:%S").to_string(),
-                    source: operator_source_label(&entry.kind).to_owned(),
-                    message: truncate(&message, 120),
-                })
-            })
-            .collect();
-        live_log.dedup_by(|left, right| left.source == right.source && left.message == right.message);
-        live_log.truncate(12);
+        let live_log: Vec<LogEntry> = Vec::new();
 
         // Extract supervisor view
         let supervisor_view = workers
@@ -207,7 +189,6 @@ impl DashboardDataSource {
             mission.final_summary.as_deref(),
             &worker_views,
             &health,
-            &live_log,
         );
 
         let done = matches!(mission.status.as_str(), "completed" | "failed")
@@ -362,7 +343,6 @@ fn compose_supervisor_markdown(
     final_summary: Option<&str>,
     workers: &[WorkerView],
     health: &HealthView,
-    live_log: &[LogEntry],
 ) -> String {
     let mut out = String::new();
 
@@ -389,30 +369,17 @@ fn compose_supervisor_markdown(
     out.push_str(&mission.mission_rewrite);
     out.push_str("\n\n---\n\n");
 
-    out.push_str("## Dispatch Tree\n\n");
+    out.push_str("## Dispatch\n\n");
     if workers.is_empty() {
         out.push_str("- Workers will appear after the supervisor emits the launch plan.\n\n");
     } else {
-        for (index, worker) in workers.iter().enumerate() {
-            let branch = if index + 1 == workers.len() { "└─" } else { "├─" };
-            let child = if index + 1 == workers.len() { "   " } else { "│  " };
+        for worker in workers {
             out.push_str(&format!(
-                "{} **{}** · {} · {}\n",
-                branch,
-                worker.name,
-                worker.role,
-                worker.state
+                "- **{}** · {} · {}\n",
+                worker.name, worker.role, worker.state
             ));
-            out.push_str(&format!(
-                "{} summary: {}\n",
-                child,
-                truncate(&worker.summary, 88)
-            ));
-            out.push_str(&format!(
-                "{} focus: {}\n",
-                child,
-                truncate(&worker.focus, 88)
-            ));
+            out.push_str(&format!("  - Summary: {}\n", truncate(&worker.summary, 88)));
+            out.push_str(&format!("  - Focus: {}\n", truncate(&worker.focus, 88)));
         }
         out.push('\n');
     }
@@ -460,18 +427,6 @@ fn compose_supervisor_markdown(
         out.push_str("### Contradictions\n\n");
         for w in &contradictions {
             out.push_str(&format!("- **{}**: {}\n", w.name, w.summary));
-        }
-        out.push('\n');
-    }
-
-    // Live log (last 8 entries)
-    if !live_log.is_empty() {
-        out.push_str("## Operator Log\n\n");
-        for entry in live_log.iter().rev().take(8) {
-            out.push_str(&format!(
-                "- `{}` {} {}\n",
-                entry.ts, entry.source, entry.message
-            ));
         }
         out.push('\n');
     }

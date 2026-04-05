@@ -23,15 +23,23 @@ const RULE: Rgb = Rgb(102, 92, 140);
 const DANGER: Rgb = Rgb(255, 138, 169);
 
 fn color_enabled() -> bool {
+    if std::env::var("SAPPHIRE_NO_COLOR").is_ok_and(|value| value != "0") {
+        return false;
+    }
+
+    if std::env::var("SAPPHIRE_FORCE_COLOR").is_ok_and(|value| value != "0")
+        || std::env::var("FORCE_COLOR").is_ok_and(|value| value != "0")
+        || std::env::var("CLICOLOR_FORCE").is_ok_and(|value| value != "0")
+    {
+        return true;
+    }
+
+    if supports_color::on_cached(supports_color::Stream::Stdout).is_some() {
+        return true;
+    }
+
     let term = std::env::var("TERM").unwrap_or_default();
-    let no_color = std::env::var_os("NO_COLOR").is_some();
-    let force_color = std::env::var("FORCE_COLOR").is_ok()
-        || std::env::var("CLICOLOR_FORCE").is_ok()
-        || std::env::var("CLICOLOR").is_ok_and(|value| value != "0");
-    !no_color
-        && std::io::stdout().is_terminal()
-        && term != "dumb"
-        && (force_color || term.contains("color") || term.contains("256") || term.contains("xterm"))
+    std::io::stdout().is_terminal() && term != "dumb"
 }
 
 fn paint(text: &str, spec: StyleSpec) -> String {

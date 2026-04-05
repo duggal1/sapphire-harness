@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use ratatui::text::{Line, Span};
 
 use crate::internal::ui::theme::theme_main::SapphireTheme;

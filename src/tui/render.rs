@@ -8,7 +8,6 @@ use crate::internal::ui::theme::theme_main::SapphireTheme;
 
 use super::data::{DashboardSnapshot, WorkerView};
 use super::state::{DashboardState, SidebarTab};
-use super::tree::{branch_body, branch_muted, branch_title, child_branch, item_branch};
 use super::widgets::{
     badge, bullet_line, key_value, muted_line, rule_line, section_header, truncate_line,
 };
@@ -191,11 +190,6 @@ fn build_body_lines(
     lines.extend(render_watchdog_summary(snapshot, theme));
     lines.push(Line::default());
 
-    lines.push(section_header(theme, "Live Log"));
-    lines.push(rule_line(theme, width));
-    lines.extend(render_log_preview(snapshot, theme));
-    lines.push(Line::default());
-
     lines.push(section_header(theme, "Supervisor Snapshot"));
     lines.push(rule_line(theme, width));
     lines.extend(render_supervisor_preview(snapshot, theme));
@@ -306,32 +300,6 @@ fn render_watchdog_summary(snapshot: &DashboardSnapshot, theme: &SapphireTheme) 
     ]
 }
 
-fn render_log_preview(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    if snapshot.live_log.is_empty() {
-        return vec![muted_line(theme, "Waiting for runtime events.")];
-    }
-
-    snapshot
-        .live_log
-        .iter()
-        .rev()
-        .take(6)
-        .enumerate()
-        .map(|(index, entry)| {
-            let branch = item_branch(index, snapshot.live_log.len().min(6));
-            Line::from(vec![
-                Span::styled(branch.to_owned(), theme.surfaces.panel.rule),
-                Span::styled(format!("{} ", entry.ts), theme.surfaces.panel.dimmed),
-                Span::styled(
-                    format!("{} ", truncate_line(&entry.source, 12)),
-                    theme.surfaces.panel.accent,
-                ),
-                Span::styled(entry.message.clone(), theme.surfaces.panel.body),
-            ])
-        })
-        .collect()
-}
-
 fn render_supervisor_preview(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
     let Some(supervisor) = &snapshot.supervisor else {
         return vec![muted_line(theme, "Supervisor not attached yet.")];
@@ -384,28 +352,25 @@ fn render_workers_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) ->
     }
 
     let mut lines = Vec::new();
-    for (index, worker) in snapshot.workers.iter().enumerate() {
-        let branch = item_branch(index, snapshot.workers.len());
-        let child = child_branch(index, snapshot.workers.len());
-        lines.push(branch_title(
-            theme,
-            branch,
-            &worker.name,
-            &format!("{} · {}", worker.role, worker.state),
-        ));
-        lines.push(branch_body(
-            theme,
-            child,
-            format!("summary {}", worker.summary),
-        ));
-        lines.push(branch_muted(
-            theme,
-            child,
-            format!("focus {}", worker.focus),
-        ));
+    for worker in &snapshot.workers {
+        lines.push(badge(theme, &worker.name, &worker.state));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{} · {}", worker.role, worker.summary),
+                theme.surfaces.panel.body,
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("focus {}", worker.focus),
+                theme.surfaces.panel.dimmed,
+            ),
+        ]));
         if let Some(validation) = &worker.validation {
             lines.push(Line::from(vec![
-                Span::styled(child.to_owned(), theme.surfaces.panel.rule),
+                Span::raw("  "),
                 Span::styled("validation ", theme.surfaces.panel.dimmed),
                 Span::styled(validation.clone(), theme.badge_style(validation)),
             ]));
@@ -491,31 +456,11 @@ fn render_watchdog_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -
     ]
 }
 
-fn render_events_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    if snapshot.live_log.is_empty() {
-        return vec![muted_line(theme, "No important operator events yet.")];
-    }
-
-    snapshot
-        .live_log
-        .iter()
-        .rev()
-        .enumerate()
-        .flat_map(|(index, entry)| {
-            let branch = item_branch(index, snapshot.live_log.len());
-            let child = child_branch(index, snapshot.live_log.len());
-            vec![
-                branch_title(
-                    theme,
-                    branch,
-                    &entry.ts,
-                    &entry.source,
-                ),
-                branch_body(theme, child, entry.message.clone()),
-                Line::default(),
-            ]
-        })
-        .collect()
+fn render_events_detail(_snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
+    vec![muted_line(
+        theme,
+        "Live event logging is disabled in the dashboard to keep the control surface responsive.",
+    )]
 }
 
 fn render_supervisor_detail(

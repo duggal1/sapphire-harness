@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -114,7 +114,10 @@ struct ActiveSession {
     last_intervention_at: Option<Instant>,
     /// Prompts queued because the agent was mid-response (nudge queue pattern).
     /// Drained when the agent goes quiet for > 3s.
-    queued_prompts: std::collections::VecDeque<String>,
+    queued_prompts: VecDeque<QueuedPrompt>,
+    queued_prompt_keys: HashSet<String>,
+    recent_prompt_keys: VecDeque<(String, Instant)>,
+    last_prompt_sent_at: Option<Instant>,
     /// Last authoritative status-file update seen for this worker.
     last_status_update_at: Option<Instant>,
     /// Last modified timestamp observed for the status file.
@@ -130,6 +133,11 @@ struct ActiveSession {
     health_state: health::SessionHealthState,
     /// Message deduplicator: prevents duplicate mail/directive processing.
     message_dedup: dedup::MessageDeduplicator,
+}
+
+struct QueuedPrompt {
+    key: String,
+    body: String,
 }
 
 struct WorkerLaunch {
@@ -2887,6 +2895,10 @@ impl Orchestrator {
             session.protocol_reminder_sent = false;
             session.low_confidence_count = 0;
             session.last_observation_key = None;
+            session.queued_prompts.clear();
+            session.queued_prompt_keys.clear();
+            session.recent_prompt_keys.clear();
+            session.last_prompt_sent_at = None;
             session.record.last_summary = Some(format!(
                 "Restarted after exit; attempt {}",
                 session.restart_count
@@ -3010,11 +3022,19 @@ impl Orchestrator {
             if session.record.role == SessionRole::Supervisor || session.state.is_terminal() {
                 continue;
             }
+            if has_recent_status_activity(session, now) {
+                continue;
+            }
             let idle_duration = now.duration_since(session.last_confirmed_alive);
+            let already_probed_this_idle_window = session
+                .health_state
+                .last_probe_at
+                .is_some_and(|last_probe| last_probe >= session.last_confirmed_alive);
             // Session is approaching stall but hasn't hit it yet
             if idle_duration >= probe_threshold
                 && idle_duration < stall_after
                 && session.state != SessionState::Stalled
+                && !already_probed_this_idle_window
             {
                 probed_ids.push(*session_id);
             }
@@ -3112,7 +3132,14 @@ impl Orchestrator {
             if now < session.startup_grace_until {
                 continue;
             }
-            if now.duration_since(session.last_confirmed_alive) >= stall_after
+            if has_recent_status_activity(session, now)
+                || !session.queued_prompts.is_empty()
+                || recently_prompted(session, now)
+            {
+                continue;
+            }
+            if now.duration_since(session.last_confirmed_alive)
+                >= effective_stall_threshold(session, stall_after)
                 && session.state != SessionState::Stalled
             {
                 stalled_ids.push(*session_id);
@@ -3273,17 +3300,21 @@ impl Orchestrator {
 
         for (session_id, session) in active_sessions.iter() {
             let lowered = session.raw_buffer.to_ascii_lowercase();
+            let now = Instant::now();
             if session.state.is_terminal()
                 || session.protocol_reminder_sent
-                || session.output_chunks < 3
+                || session.output_chunks < 8
                 || session.directive_count > 0
-                || Instant::now() < session.startup_grace_until
+                || now < session.startup_grace_until
                 || session.started_at.elapsed() < protocol_reminder_grace(session.record.agent)
+                || now.duration_since(session.last_confirmed_alive) < Duration::from_secs(30)
                 || session.last_status_update_at.is_some_and(|at| {
-                    Instant::now().duration_since(at)
+                    now.duration_since(at)
                         < Duration::from_secs(supervisor::STATUS_FILE_LIVENESS_GRACE_SECS)
                 })
-                || is_in_cooldown(session, Instant::now())
+                || is_in_cooldown(session, now)
+                || !session.queued_prompts.is_empty()
+                || recently_prompted(session, now)
                 || (session.record.agent == crate::agent::AgentKind::Qwen
                     && (lowered.contains("readfile")
                         || lowered.contains("writefile")
@@ -4092,7 +4123,10 @@ fn register_session(
             total_interventions: 0,
             last_response_time: None,
             last_intervention_at: None,
-            queued_prompts: std::collections::VecDeque::new(),
+            queued_prompts: VecDeque::new(),
+            queued_prompt_keys: HashSet::new(),
+            recent_prompt_keys: VecDeque::new(),
+            last_prompt_sent_at: None,
             last_status_update_at: None,
             last_status_file_modified: None,
             last_supervisor_notice_key: None,
@@ -4226,15 +4260,17 @@ fn supervisor_decision_key(kind: SupervisorDecisionKind, target_session_id: Uuid
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use chrono::Utc;
 
     use super::{
         ActiveSession, Orchestrator, SupervisorDecisionKind, SupervisorMode, WatchdogStats,
+        drain_prompt_queues,
         deterministic_plan_for_mission, ensure_agents_bootstrap, normalize_supervisor_plan,
         queue_supervisor_decision, rebuild_launch_spec, register_session,
         render_supervisor_prompt_with_agents, should_auto_restart,
+        send_or_queue_prompt,
         startup_grace,
     };
     use crate::agent::AgentKind;
@@ -4838,6 +4874,188 @@ mod tests {
         // The counter was reset — now the worker is alive again.
         assert_eq!(active_sessions.get(&worker_id).unwrap().consecutive_stall_failures, 0);
         assert!(worker_probe.sent_texts().is_empty() || true); // Reset happened, no extra prompt needed for this test.
+    }
+
+    #[test]
+    fn duplicate_prompt_is_not_queued_repeatedly() {
+        let mission_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+
+        let session = active_sessions.get_mut(&worker_id).expect("worker");
+        session.output_chunks = 1;
+        session.last_output_at = Instant::now();
+
+        assert!(!send_or_queue_prompt(session, "repeat this"));
+        assert!(!send_or_queue_prompt(session, "repeat this"));
+        assert_eq!(session.queued_prompts.len(), 1);
+    }
+
+    #[test]
+    fn queued_prompts_drain_one_at_a_time() {
+        let mission_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        let worker_probe = insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+
+        let session = active_sessions.get_mut(&worker_id).expect("worker");
+        session.output_chunks = 1;
+        session.last_output_at = Instant::now();
+        assert!(!send_or_queue_prompt(session, "first"));
+        assert!(!send_or_queue_prompt(session, "second"));
+
+        session.last_output_at = Instant::now() - Duration::from_secs(10);
+        drain_prompt_queues(&mut active_sessions);
+        assert_eq!(worker_probe.sent_texts().len(), 1);
+        assert_eq!(
+            active_sessions.get(&worker_id).expect("worker").queued_prompts.len(),
+            1
+        );
+
+        let session = active_sessions.get_mut(&worker_id).expect("worker");
+        session.last_prompt_sent_at = Some(Instant::now() - Duration::from_secs(60));
+        drain_prompt_queues(&mut active_sessions);
+        assert_eq!(worker_probe.sent_texts().len(), 2);
+        assert!(
+            active_sessions
+                .get(&worker_id)
+                .expect("worker")
+                .queued_prompts
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn active_worker_gets_extended_stall_threshold() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+        let worker = active_sessions.get_mut(&worker_id).expect("worker");
+        worker.output_chunks = 12;
+        worker.last_output_at = Instant::now() - Duration::from_secs(30);
+        worker.last_confirmed_alive = Instant::now() - Duration::from_secs(30);
+        worker.startup_grace_until = Instant::now() - Duration::from_secs(1);
+
+        let mut pending_supervisor_decisions = HashMap::new();
+        let mut stats = WatchdogStats::default();
+        orchestrator
+            .handle_stalls(
+                mission_id,
+                Path::new("."),
+                supervisor_id,
+                Duration::from_secs(15),
+                &mut active_sessions,
+                &mut pending_supervisor_decisions,
+                false,
+                &mut stats,
+            )
+            .expect("stall handling");
+
+        assert!(pending_supervisor_decisions.is_empty());
+        assert_eq!(
+            active_sessions.get(&worker_id).expect("worker").state,
+            SessionState::Progressing
+        );
+    }
+
+    #[test]
+    fn health_probe_only_records_once_per_idle_window() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+        let worker = active_sessions.get_mut(&worker_id).expect("worker");
+        worker.last_confirmed_alive = Instant::now() - Duration::from_secs(12);
+        worker.startup_grace_until = Instant::now() - Duration::from_secs(1);
+
+        let mut stats = WatchdogStats::default();
+        orchestrator
+            .health_probe_sessions(
+                mission_id,
+                Duration::from_secs(15),
+                &mut active_sessions,
+                &mut stats,
+            )
+            .expect("first probe");
+        orchestrator
+            .health_probe_sessions(
+                mission_id,
+                Duration::from_secs(15),
+                &mut active_sessions,
+                &mut stats,
+            )
+            .expect("second probe");
+
+        assert_eq!(stats.supervisor_health_events, 1);
+        assert_eq!(
+            active_sessions
+                .get(&worker_id)
+                .expect("worker")
+                .health_state
+                .consecutive_probe_failures,
+            1
+        );
     }
 
     #[test]
@@ -6082,17 +6300,98 @@ fn is_agent_mid_response(session: &ActiveSession) -> bool {
         && session.output_chunks > 0
 }
 
+fn prompt_fingerprint(prompt: &str) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    blake3::hash(normalized.as_bytes()).to_hex().to_string()
+}
+
+fn prompt_repeat_suppression_window() -> Duration {
+    Duration::from_secs(180)
+}
+
+fn prompt_queue_limit() -> usize {
+    6
+}
+
+fn prompt_dispatch_interval(session: &ActiveSession) -> Duration {
+    Duration::from_secs(12 + (session.total_interventions.min(4) as u64 * 8))
+}
+
+fn prune_recent_prompt_keys(session: &mut ActiveSession, now: Instant) {
+    while session
+        .recent_prompt_keys
+        .front()
+        .is_some_and(|(_, sent_at)| now.duration_since(*sent_at) > prompt_repeat_suppression_window())
+    {
+        session.recent_prompt_keys.pop_front();
+    }
+}
+
+fn has_recent_prompt_key(session: &ActiveSession, key: &str) -> bool {
+    session
+        .recent_prompt_keys
+        .iter()
+        .any(|(existing, _)| existing == key)
+}
+
+fn remember_prompt_delivery(session: &mut ActiveSession, key: String, now: Instant) {
+    session.last_prompt_sent_at = Some(now);
+    session.recent_prompt_keys.push_back((key, now));
+    while session.recent_prompt_keys.len() > 32 {
+        session.recent_prompt_keys.pop_front();
+    }
+}
+
+fn has_recent_status_activity(session: &ActiveSession, now: Instant) -> bool {
+    session.last_status_update_at.is_some_and(|at| {
+        now.duration_since(at)
+            < Duration::from_secs(supervisor::STATUS_FILE_LIVENESS_GRACE_SECS * 3)
+    })
+}
+
+fn effective_stall_threshold(session: &ActiveSession, stall_after: Duration) -> Duration {
+    if session.output_chunks > 0 || session.last_status_update_at.is_some() {
+        stall_after.mul_f64(3.0)
+    } else {
+        stall_after
+    }
+}
+
+fn recently_prompted(session: &ActiveSession, now: Instant) -> bool {
+    session
+        .last_prompt_sent_at
+        .is_some_and(|last| now.duration_since(last) < prompt_dispatch_interval(session))
+}
+
 /// Try to send a prompt, or queue it if the agent is mid-response.
 /// Returns true if the prompt was sent immediately, false if it was queued.
 fn send_or_queue_prompt(
     session: &mut ActiveSession,
     prompt: &str,
 ) -> bool {
-    if is_agent_mid_response(session) {
-        session.queued_prompts.push_back(prompt.to_owned());
+    let now = Instant::now();
+    let key = prompt_fingerprint(prompt);
+    prune_recent_prompt_keys(session, now);
+
+    if session.queued_prompt_keys.contains(&key) || has_recent_prompt_key(session, &key) {
+        return false;
+    }
+
+    if is_agent_mid_response(session) || recently_prompted(session, now) {
+        if session.queued_prompts.len() >= prompt_queue_limit() {
+            if let Some(evicted) = session.queued_prompts.pop_front() {
+                session.queued_prompt_keys.remove(&evicted.key);
+            }
+        }
+        session.queued_prompt_keys.insert(key.clone());
+        session.queued_prompts.push_back(QueuedPrompt {
+            key,
+            body: prompt.to_owned(),
+        });
         false
     } else {
         let _ = session.runtime.send_prompt(prompt);
+        remember_prompt_delivery(session, key, now);
         true
     }
 }
@@ -6102,12 +6401,17 @@ fn drain_prompt_queues(
     active_sessions: &mut HashMap<Uuid, ActiveSession>,
 ) {
     let mut drained = Vec::new();
+    let now = Instant::now();
     for (session_id, session) in active_sessions.iter_mut() {
-        while !session.queued_prompts.is_empty() && !is_agent_mid_response(session) {
-            if let Some(prompt) = session.queued_prompts.pop_front() {
-                let _ = session.runtime.send_prompt(&prompt);
-                drained.push((session_id.clone(), prompt));
-            }
+        prune_recent_prompt_keys(session, now);
+        if is_agent_mid_response(session) || recently_prompted(session, now) {
+            continue;
+        }
+        if let Some(prompt) = session.queued_prompts.pop_front() {
+            session.queued_prompt_keys.remove(&prompt.key);
+            let _ = session.runtime.send_prompt(&prompt.body);
+            remember_prompt_delivery(session, prompt.key, now);
+            drained.push((*session_id, prompt.body));
         }
     }
     // Log drained prompts (best-effort, non-fatal)
