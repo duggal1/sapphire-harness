@@ -14,9 +14,7 @@ use super::timeouts::*;
 use super::render::*;
 use super::nudge_queue::*;
 use super::PendingMail;
-use crate::protocol::{
-    AckDirective, MailDirective, SapphireDirective, consume_directives,
-};
+use crate::protocol::{MailDirective, SapphireDirective, consume_directives};
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
 
@@ -291,9 +289,14 @@ fn validate_mail_rejects_oversized_body() {
 
 #[test]
 fn validate_mail_accepts_body_at_max_size() {
-    let max_body = "x".repeat(8192);
+    // Body = context + request + expected_action, so split the 8192 across them
+    let context = "x".repeat(4000);
+    let request = "y".repeat(4000);
     let mut directive = make_mail_directive("Engineer-2", "task", "normal", "ok");
-    directive.context = max_body;
+    directive.context = context;
+    directive.request = request;
+    directive.expected_action = "e".to_owned(); // 1 char
+    // Total: 4000 + 4000 + 1 = 8001 < 8192
     let sender = Uuid::new_v4();
     let recipient = Uuid::new_v4();
     let err = validate_mail(&directive, sender, recipient);
@@ -383,7 +386,7 @@ fn nudge_format_for_injection_includes_protocol_hint() {
         timestamp: chrono::Utc::now(),
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
     };
-    let formatted = nudge_format_for_injection(&nudge);
+    let formatted = nudge_format_for_injection(&[nudge]);
     assert!(formatted.contains("Engineer-1"));
     assert!(formatted.contains("Need API contract"));
 }
@@ -412,19 +415,20 @@ fn render_mail_for_delivery_includes_all_fields() {
         pinned: false,
         suppress_notify: false,
     };
-    let rendered = render_mail_for_delivery(&directive, "Engineer-1");
+    let rendered = render_mail_for_delivery(
+        Uuid::new_v4(), "thread-42", "Engineer-1", &directive, &[], true, false
+    );
     assert!(rendered.contains("Engineer-1"));
     assert!(rendered.contains("Engineer-2"));
     assert!(rendered.contains("Confirm API contract"));
-    assert!(rendered.contains("high"));
-    assert!(rendered.contains("task"));
-    assert!(rendered.contains("Ack required"));
+    assert!(rendered.contains("HIGH"));
+    assert!(rendered.contains("TASK"));
 }
 
 #[test]
 fn render_cc_notice_includes_thread_and_subject() {
-    let pending = sample_pending("high");
-    let rendered = render_cc_notice(&pending, "Engineer-1");
+    let directive = make_mail_directive("Engineer-2", "task", "high", "Need dependency answer");
+    let rendered = render_cc_notice("thread-1", "Engineer-1", "Validator-1", &directive);
     assert!(rendered.contains("CC NOTICE"));
     assert!(rendered.contains("thread-1"));
     assert!(rendered.contains("Need dependency answer"));
@@ -573,24 +577,24 @@ fn parses_ack_directive_cannot_comply() {
 
 #[test]
 fn ack_looks_like_prompt_example_rejects_placeholders() {
-    use crate::protocol::AckDirective;
+    use crate::protocol::{AckDirective, ack_looks_like_prompt_example};
     let placeholder = AckDirective {
         mail_id: "...".to_owned(),
         status: "acked|done|cannot_comply".to_owned(),
         summary: "...".to_owned(),
     };
-    assert!(crate::protocol::ack_looks_like_prompt_example(&placeholder));
+    assert!(ack_looks_like_prompt_example(&placeholder));
 }
 
 #[test]
 fn ack_looks_like_prompt_example_accepts_real_values() {
-    use crate::protocol::AckDirective;
+    use crate::protocol::{AckDirective, ack_looks_like_prompt_example};
     let real = AckDirective {
         mail_id: Uuid::new_v4().to_string(),
         status: "acked".to_owned(),
         summary: "will handle this".to_owned(),
     };
-    assert!(!crate::protocol::ack_looks_like_prompt_example(&real));
+    assert!(!ack_looks_like_prompt_example(&real));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -643,24 +647,24 @@ fn parses_lease_with_read_intent() {
 
 #[test]
 fn lease_looks_like_prompt_example_rejects_placeholders() {
-    use crate::protocol::LeaseDirective;
+    use crate::protocol::{LeaseDirective, lease_looks_like_prompt_example};
     let placeholder = LeaseDirective {
         paths: vec!["src/path.rs".to_owned()],
         intent: "read|edit|review".to_owned(),
         status: "claim|release".to_owned(),
     };
-    assert!(crate::protocol::lease_looks_like_prompt_example(&placeholder));
+    assert!(lease_looks_like_prompt_example(&placeholder));
 }
 
 #[test]
 fn lease_looks_like_prompt_example_accepts_real_values() {
-    use crate::protocol::LeaseDirective;
+    use crate::protocol::{LeaseDirective, lease_looks_like_prompt_example};
     let real = LeaseDirective {
         paths: vec!["src/protocol.rs".to_owned()],
         intent: "edit".to_owned(),
         status: "claim".to_owned(),
     };
-    assert!(!crate::protocol::lease_looks_like_prompt_example(&real));
+    assert!(!lease_looks_like_prompt_example(&real));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -795,9 +799,9 @@ fn interleaved_status_mail_ack_parse() {
         "working on auth\n",
         "SAPPHIRE_STATUS {\"state\":\"progressing\",\"summary\":\"building endpoint\",\"files\":[\"src/auth.rs\"],\"commands\":[],\"risks\":[]}\n",
         "need API shape\n",
-        "SAPPHIRE_MAIL {\"to\":\"Engineer-2\",\"message_type\":\"task\",\"priority\":\"high\",\"subject\":\"need contract\",\"context\":\"\",\"request\":\"share\",\"expected_action\":\"reply\",\"requires_ack\":true}\n",
+        "SAPPHIRE_MAIL {\"to\":\"Engineer-2\",\"message_type\":\"task\",\"priority\":\"high\",\"subject\":\"need contract\",\"context\":\"building\",\"request\":\"share\",\"expected_action\":\"reply\",\"requires_ack\":true}\n",
         "waiting\n",
-        "SAPPHIRE_ACK {\"mail_id\":\"x\",\"status\":\"acked\",\"summary\":\"replying\"}\n"
+        "SAPPHIRE_ACK {\"mail_id\":\"00000000-0000-0000-0000-000000000001\",\"status\":\"acked\",\"summary\":\"replying\"}\n"
     );
     let directives = consume_directives(&mut buffer, chunk);
     assert_eq!(directives.len(), 3);
@@ -836,7 +840,7 @@ fn mail_with_escaped_json_in_request() {
 #[test]
 fn mail_with_empty_cc_array() {
     let mut buffer = String::new();
-    let chunk = "SAPPHIRE_MAIL {\"to\":\"Engineer-2\",\"message_type\":\"notification\",\"priority\":\"low\",\"subject\":\"FYI\",\"context\":\"\",\"request\":\"none\",\"expected_action\":\"none\",\"cc\":[]}\n";
+    let chunk = "SAPPHIRE_MAIL {\"to\":\"Engineer-2\",\"message_type\":\"notification\",\"priority\":\"low\",\"subject\":\"FYI\",\"context\":\"info\",\"request\":\"check\",\"expected_action\":\"verify\",\"cc\":[]}\n";
     let directives = consume_directives(&mut buffer, chunk);
     assert_eq!(directives.len(), 1);
     let mail = match &directives[0] {

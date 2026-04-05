@@ -249,13 +249,13 @@ fn mail_looks_like_prompt_example(directive: &MailDirective) -> bool {
         || looks_like_placeholder_text(&directive.expected_action)
 }
 
-fn ack_looks_like_prompt_example(directive: &AckDirective) -> bool {
+pub(crate) fn ack_looks_like_prompt_example(directive: &AckDirective) -> bool {
     looks_like_placeholder_text(&directive.mail_id)
         || looks_like_placeholder_text(&directive.status)
         || looks_like_placeholder_text(&directive.summary)
 }
 
-fn lease_looks_like_prompt_example(directive: &LeaseDirective) -> bool {
+pub(crate) fn lease_looks_like_prompt_example(directive: &LeaseDirective) -> bool {
     looks_like_placeholder_text(&directive.intent)
         || looks_like_placeholder_text(&directive.status)
         || directive
