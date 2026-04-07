@@ -350,12 +350,13 @@ impl Orchestrator {
             None,
             "mission_profile",
             format!(
-                "coordination_focused={} deterministic_planning={} lean_supervision={} repair_supervisor={} state_cards={}",
+                "coordination_focused={} repair_supervisor={} health_recovery={} state_cards={} protocol_reminders={} health_probes={}",
                 mission_profile.coordination_focused,
-                mission_profile.deterministic_planning,
-                mission_profile.lean_supervision,
                 mission_profile.enable_repair_supervisor,
+                mission_profile.enable_supervisor_health_recovery,
                 mission_profile.enable_state_cards,
+                mission_profile.enable_protocol_reminders,
+                mission_profile.enable_health_probes,
             ),
         )?;
 
@@ -4898,8 +4899,7 @@ mod tests {
         enforcement,
         ActiveSession, HEURISTIC_SETTLE_THRESHOLD, Orchestrator, QueuedPrompt,
         SupervisorDecisionKind, SupervisorMode, WatchdogStats,
-        drain_prompt_queues,
-        deterministic_plan_for_mission, ensure_agents_bootstrap, ensure_state_tree, hidden_state_dir, normalize_supervisor_plan,
+        drain_prompt_queues, ensure_agents_bootstrap, ensure_state_tree, hidden_state_dir, normalize_supervisor_plan,
         mission_profile,
         queue_supervisor_decision, rebuild_launch_spec, register_session,
         render_supervisor_prompt_with_agents, should_auto_restart,
@@ -5067,50 +5067,32 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_plan_builds_expected_worker_count() {
-        let plan = deterministic_plan_for_mission(
-            "Prove Sapphire terminal orchestration works.",
-            2,
-        );
-        assert_eq!(plan.worker_packets.len(), 2);
-        assert_eq!(plan.workstreams.len(), 2);
-        assert_eq!(plan.worker_packets[0].display_name, "Validator-1");
-    }
-
-    #[test]
-    fn lean_coordination_profile_uses_deterministic_planning() {
+    fn all_profiles_enable_full_safety_nets() {
         let config = test_launch_config(
             "Talk to your teammate and prove the team can work together.",
             3,
         );
         let profile = mission_profile::MissionProfile::from_launch(&config);
         assert!(profile.coordination_focused);
-        assert!(profile.deterministic_planning);
-        assert!(profile.lean_supervision);
-        assert!(!profile.enable_repair_supervisor);
-        assert!(!profile.enable_state_cards);
+        // ALL safety nets are always enabled — no lean mode, no cheaping out.
+        assert!(profile.enable_repair_supervisor);
+        assert!(profile.enable_supervisor_health_recovery);
+        assert!(profile.enable_state_cards);
+        assert!(profile.enable_protocol_reminders);
+        assert!(profile.enable_health_probes);
     }
 
     #[test]
-    fn coordination_plan_requires_real_teammate_mail() {
-        let profile = mission_profile::MissionProfile::from_launch(&test_launch_config(
-            "Talk to your teammate and prove the team can work together.",
-            3,
-        ));
-        let plan = mission_profile::deterministic_plan_for_mission(
-            "Talk to your teammate and prove the team can work together.",
-            3,
-            profile,
-        );
-        assert_eq!(plan.worker_packets.len(), 3);
-        assert!(plan.worker_packets[0]
-            .communication_rules
-            .iter()
-            .any(|rule| rule.contains("SAPPHIRE_MAIL")));
-        assert!(plan.worker_packets[0]
-            .definition_of_done
-            .iter()
-            .any(|rule| rule.contains("mail thread")));
+    fn non_coordination_profile_still_has_full_safety_nets() {
+        let config = test_launch_config("Fix the login bug.", 4);
+        let profile = mission_profile::MissionProfile::from_launch(&config);
+        assert!(!profile.coordination_focused);
+        // Safety nets are ALWAYS on regardless of mission type.
+        assert!(profile.enable_repair_supervisor);
+        assert!(profile.enable_supervisor_health_recovery);
+        assert!(profile.enable_state_cards);
+        assert!(profile.enable_protocol_reminders);
+        assert!(profile.enable_health_probes);
     }
 
     #[test]
@@ -6424,231 +6406,6 @@ fn pending_supervisor_plan(mission: &str) -> MissionPlan {
         risk_map: Vec::new(),
         worker_packets: Vec::new(),
         supervision_strategy: "Pending supervisor planning.".to_owned(),
-    }
-}
-
-#[cfg(test)]
-fn deterministic_plan_for_mission(mission: &str, worker_count: usize) -> MissionPlan {
-    let worker_count = worker_count.max(1);
-    let lowered = mission.to_ascii_lowercase();
-    let role_type = deterministic_role_type(&lowered);
-    let role_title = deterministic_role_title(&role_type);
-    let mission_rewrite = truncate(mission.trim(), 140);
-
-    let workstreams = (1..=worker_count)
-        .map(|ordinal| Workstream {
-            id: format!("ws-{ordinal}"),
-            name: format!("{} lane {}", deterministic_workstream_name(&lowered), ordinal),
-            execution: WorkstreamExecution::Parallel,
-            owned_scope: deterministic_owned_scope(&lowered),
-            success_criteria: vec![
-                "Stay inside the assigned scope.".to_owned(),
-                "Prove the result with concrete evidence.".to_owned(),
-                "Report blockers immediately with Sapphire status.".to_owned(),
-            ],
-            depends_on: Vec::new(),
-        })
-        .collect();
-
-    let worker_packets = (1..=worker_count)
-        .map(|ordinal| {
-            let display_name = deterministic_display_name(&role_type, ordinal);
-            WorkerPacket {
-                worker_id: display_name.clone(),
-                role_type: role_type.clone(),
-                display_name: display_name.clone(),
-                role: role_title.clone(),
-                starting_angle: deterministic_starting_angle(&lowered, ordinal),
-                owned_scope: deterministic_owned_scope(&lowered),
-                explicit_task: deterministic_explicit_task(mission, ordinal),
-                out_of_scope: "Do not broaden scope, rewrite unrelated code, or duplicate another lane.".to_owned(),
-                definition_of_done: vec![
-                    "Deliver the scoped result only.".to_owned(),
-                    "Show proof that the assigned lane was completed.".to_owned(),
-                    "Use Sapphire status updates so the supervisor can validate the result.".to_owned(),
-                ],
-                required_evidence: vec![
-                    "List touched files.".to_owned(),
-                    "List validation commands or observations.".to_owned(),
-                    "State what was proven or what blocked completion.".to_owned(),
-                ],
-                blocker_protocol: "If blocked, report the blocker immediately with a machine-readable Sapphire status update.".to_owned(),
-                conflict_warning: "Claim files before editing and avoid overlap with other workers.".to_owned(),
-                communication_rules: vec![
-                    "Use supervisor-visible coordination for blockers or dependencies.".to_owned(),
-                    "Keep updates concise, factual, and scoped to your lane.".to_owned(),
-                ],
-                validation_standard: vec![
-                    "Do not claim done without evidence.".to_owned(),
-                    "Report uncertainty instead of guessing.".to_owned(),
-                ],
-                expected_output_format: vec![
-                    "STATE".to_owned(),
-                    "SUMMARY".to_owned(),
-                    "FILES".to_owned(),
-                    "BLOCKER".to_owned(),
-                    "DONE".to_owned(),
-                ],
-            }
-        })
-        .collect();
-
-    MissionPlan {
-        mission_rewrite,
-        workstreams,
-        risk_map: vec![
-            RiskItem {
-                zone: "Planning".to_owned(),
-                risk: "Supervisor planner unavailable or malformed.".to_owned(),
-                mitigation: "Use deterministic planning fixture and keep worker scope narrow.".to_owned(),
-            },
-            RiskItem {
-                zone: "Coordination".to_owned(),
-                risk: "Workers may overlap or drift when planning is degraded.".to_owned(),
-                mitigation: "Use explicit lane ownership, status updates, and lease discipline.".to_owned(),
-            },
-        ],
-        worker_packets,
-        supervision_strategy: "Deterministic planning fixture. Keep scope tight, validate every claim, and prefer evidence over narration.".to_owned(),
-    }
-}
-
-#[cfg(test)]
-fn deterministic_role_type(mission: &str) -> String {
-    if mission.contains("security") || mission.contains("auth") || mission.contains("vuln") {
-        "security-engineer".to_owned()
-    } else if mission.contains("compliance") || mission.contains("policy") {
-        "compliance-engineer".to_owned()
-    } else if mission.contains("revenue")
-        || mission.contains("pricing")
-        || mission.contains("enterprise")
-        || mission.contains("sell")
-        || mission.contains("sales")
-    {
-        "revenue-engineer".to_owned()
-    } else if mission.contains("product manager")
-        || mission.contains("product strategy")
-        || mission.contains("positioning")
-    {
-        "product-manager".to_owned()
-    } else if mission.contains("design") || mission.contains("ui") || mission.contains("ux") {
-        "designer-engineer".to_owned()
-    } else if mission.contains("test")
-        || mission.contains("validate")
-        || mission.contains("verify")
-        || mission.contains("prove")
-    {
-        "validation-engineer".to_owned()
-    } else if mission.contains("debug")
-        || mission.contains("fix")
-        || mission.contains("bug")
-        || mission.contains("broken")
-    {
-        "debug-and-review-engineer".to_owned()
-    } else {
-        "software-engineer".to_owned()
-    }
-}
-
-#[cfg(test)]
-fn deterministic_role_title(role_type: &str) -> String {
-    match role_type {
-        "software-engineer" => "Software Engineer".to_owned(),
-        "research-engineer" => "Research Engineer".to_owned(),
-        "validation-engineer" => "Validation Engineer".to_owned(),
-        "architecture-engineer" => "Architecture Engineer".to_owned(),
-        "security-engineer" => "Security Engineer".to_owned(),
-        "debug-and-review-engineer" => "Debug and Review Engineer".to_owned(),
-        "testing-and-automation-engineer" => "Testing and Automation Engineer".to_owned(),
-        "designer-engineer" => "Designer Engineer".to_owned(),
-        "sales-engineer" => "Sales Engineer".to_owned(),
-        "solutions-engineer" => "Solutions Engineer".to_owned(),
-        "customer-success-engineer" => "Customer Success Engineer".to_owned(),
-        "product-engineer" => "Product Engineer".to_owned(),
-        "product-manager" => "Product Manager".to_owned(),
-        "revenue-engineer" => "Revenue Engineer".to_owned(),
-        "compliance-engineer" => "Compliance Engineer".to_owned(),
-        _ => "Software Engineer".to_owned(),
-    }
-}
-
-#[cfg(test)]
-fn deterministic_display_name(role_type: &str, ordinal: usize) -> String {
-    let prefix = match role_type {
-        "software-engineer" => "Engineer",
-        "research-engineer" => "Researcher",
-        "validation-engineer" => "Validator",
-        "architecture-engineer" => "Architect",
-        "security-engineer" => "Security",
-        "debug-and-review-engineer" => "Reviewer",
-        "testing-and-automation-engineer" => "QA",
-        "designer-engineer" => "Designer",
-        "sales-engineer" => "Sales",
-        "solutions-engineer" => "Solutions",
-        "customer-success-engineer" => "CustomerSuccess",
-        "product-engineer" => "Product",
-        "product-manager" => "ProductManager",
-        "revenue-engineer" => "Revenue",
-        "compliance-engineer" => "Compliance",
-        _ => "Engineer",
-    };
-    format!("{prefix}-{ordinal}")
-}
-
-#[cfg(test)]
-fn deterministic_workstream_name(mission: &str) -> &'static str {
-    if mission.contains("test")
-        || mission.contains("validate")
-        || mission.contains("verify")
-        || mission.contains("prove")
-    {
-        "Validation"
-    } else if mission.contains("debug") || mission.contains("fix") || mission.contains("bug") {
-        "Debug"
-    } else if mission.contains("design") || mission.contains("ui") || mission.contains("ux") {
-        "UI"
-    } else {
-        "Implementation"
-    }
-}
-
-#[cfg(test)]
-fn deterministic_owned_scope(mission: &str) -> String {
-    if mission.contains("tmux") || mission.contains("terminal") || mission.contains("orchestration")
-    {
-        "Sapphire runtime, tmux surface, worker coordination, and mission evidence.".to_owned()
-    } else if mission.contains("ui") || mission.contains("ux") || mission.contains("design") {
-        "UI surfaces, rendering paths, and interaction flow.".to_owned()
-    } else {
-        "Requested mission scope only, constrained to the repo root and directly relevant files.".to_owned()
-    }
-}
-
-#[cfg(test)]
-fn deterministic_starting_angle(mission: &str, ordinal: usize) -> String {
-    let lane = match ordinal {
-        1 => "primary path",
-        2 => "independent verification path",
-        3 => "failure-path review",
-        4 => "integration review",
-        _ => "narrow scoped pass",
-    };
-    if mission.contains("terminal") || mission.contains("orchestration") {
-        format!("Audit live terminal coordination via {lane}.")
-    } else if mission.contains("validate") || mission.contains("prove") {
-        format!("Challenge the claim set via {lane}.")
-    } else {
-        format!("Execute the scoped task via {lane}.")
-    }
-}
-
-#[cfg(test)]
-fn deterministic_explicit_task(mission: &str, ordinal: usize) -> String {
-    match ordinal {
-        1 => format!("Own the main delivery path for: {}", truncate(mission.trim(), 160)),
-        2 => "Independently verify the main path and challenge weak claims.".to_owned(),
-        3 => "Inspect failure paths, overlap risk, and missing evidence.".to_owned(),
-        _ => format!("Take a narrow parallel slice of: {}", truncate(mission.trim(), 160)),
     }
 }
 
