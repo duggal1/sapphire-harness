@@ -421,20 +421,12 @@ impl Orchestrator {
         if !config.dry_run {
             notes.push("startup: direct live launch without preflight gate".to_owned());
         }
-        let plan_outcome = if mission_profile.deterministic_planning {
-            PlanOutcome {
-                plan: mission_profile::deterministic_plan_for_mission(
-                    &config.mission,
-                    config.worker_count,
-                    mission_profile,
-                ),
-                source: "deterministic",
-            }
-        } else {
-            // NO FALLBACK. Supervisor must produce a valid plan or the launch fails.
-            self.plan_with_supervisor(mission_id, &config, &supervisor_session)
-                .await?
-        };
+
+        // ALWAYS use the supervisor AI brain. No deterministic fallback.
+        // The supervisor MUST decompose the mission into genuinely different worker tasks.
+        let plan_outcome = self
+            .plan_with_supervisor(mission_id, &config, &supervisor_session)
+            .await?;
         let planned_worker_count = plan_outcome.plan.worker_packets.len();
         let effective_plan = plan_outcome.plan.clone();
         self.store
