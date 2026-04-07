@@ -327,6 +327,70 @@ pub fn init_git_repo(repo: &Path, remote_url: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn push_current_branch(repo: &Path) -> Result<()> {
+    render_banner();
+    match check_git_state(repo) {
+        GitState::Unavailable => anyhow::bail!("git is not available in the current environment"),
+        GitState::NotARepo => anyhow::bail!("{} is not a git repository", repo.display()),
+        GitState::NoRemote => anyhow::bail!(
+            "{} has no remote configured. Initialize one first, then rerun `sp push`",
+            repo.display()
+        ),
+        GitState::Ready { .. } => {}
+    }
+
+    let branch = current_branch(repo)
+        .filter(|value| !value.is_empty())
+        .context("failed to determine the current git branch")?;
+    if matches!(branch.as_str(), "main" | "master") {
+        anyhow::bail!(
+            "refusing to push protected branch `{branch}` through Sapphire. Create or switch to a feature branch first"
+        );
+    }
+
+    let _lock = CommitLock::new(repo)
+        .acquire_with_timeout(10)
+        .context("timed out waiting for the Sapphire commit lock before push")?;
+
+    println!("  {}", ansi::rule(&rule_line()));
+    println!(
+        "  {}  {}",
+        ansi::brand_soft_bold(Symbol::Prompt.as_str()),
+        ansi::text_bold("Sapphire Push")
+    );
+    println!("  {}", ansi::rule(&rule_line()));
+    println!();
+    println!("  {}", ansi::muted("Operator-owned push path engaged."));
+    println!(
+        "  {}",
+        ansi::muted(&format!("Repository: {}", repo.display()))
+    );
+    println!("  {}", ansi::muted(&format!("Branch: {branch}")));
+    println!();
+
+    if has_upstream_branch(repo)? {
+        run_git_command(repo, &["push"], "git push failed")?;
+    } else {
+        run_git_command(
+            repo,
+            &["push", "--set-upstream", "origin", &branch],
+            "git push failed",
+        )?;
+    }
+
+    println!(
+        "  {}  {}",
+        ansi::success_bold(Symbol::Success.as_str()),
+        ansi::success_bold("Push completed")
+    );
+    println!(
+        "     {}",
+        ansi::muted(&format!("origin/{branch} is now updated"))
+    );
+    println!();
+    Ok(())
+}
+
 fn run_git_command(repo: &Path, args: &[&str], failure_message: &str) -> Result<()> {
     let output = Command::new("git")
         .args(args)
@@ -349,6 +413,15 @@ fn run_git_command(repo: &Path, args: &[&str], failure_message: &str) -> Result<
     };
 
     anyhow::bail!("{failure_message}: {detail}");
+}
+
+fn has_upstream_branch(repo: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("failed to inspect upstream for {}", repo.display()))?;
+    Ok(output.status.success())
 }
 
 // ─── Commit Lock (Prevent Overlapping Commits) ──────────────────────────

@@ -138,6 +138,8 @@ pub struct SupervisorAction {
 pub struct FinalEnvelope {
     /// Final session state
     pub state: SessionState,
+    /// Whether the supervisor authorizedized cleanup and terminal shutdown.
+    pub ready_for_cleanup: bool,
     /// Summary of final result
     pub summary: String,
 }
@@ -155,7 +157,7 @@ pub trait CliAdapter: Send + Sync {
         packet: &WorkerPacket,
     ) -> String;
 
-    fn build_validation_prompt(&self) -> String;
+    fn build_validation_prompt(&self, message: &str) -> String;
 
     fn build_correction_prompt(&self, reason: &str) -> String;
 
@@ -216,8 +218,8 @@ macro_rules! impl_standard_adapter {
                 build_assignment_prompt_impl(prompts, mission, packet)
             }
 
-            fn build_validation_prompt(&self) -> String {
-                build_validation_prompt_impl()
+            fn build_validation_prompt(&self, message: &str) -> String {
+                build_validation_prompt_impl(message)
             }
 
             fn build_correction_prompt(&self, reason: &str) -> String {
@@ -289,10 +291,9 @@ fn build_assignment_prompt_impl(
     )
 }
 
-fn build_validation_prompt_impl() -> String {
-    let lead = "Validation challenge.\nDo not continue broad explanation.";
+fn build_validation_prompt_impl(message: &str) -> String {
     format!(
-        "{lead}\nReply only with:\n{}\nUse STATE as one of validated, needs_retry, blocked, failed.",
+        "{message}\n\nReply only with:\n{}\nUse STATE as one of validated, needs_retry, blocked, failed.",
         status_envelope_contract()
     )
 }
@@ -312,48 +313,73 @@ fn build_supervisor_plan_prompt_impl(
     worker_count: usize,
 ) -> String {
     format!(
-        "You are the supervisor brain. Convert one messy mission into the execution plan Sapphire will use.\n\
+        "You are the supervisor. You will receive a multi-step mission. Your ONLY job is to \
+        decompose it into {worker_count} GENUINELY DIFFERENT sub-tasks — each with a distinct \
+        role, file scope, starting angle, explicit task, and success criteria.\n\
         \n\
-        STRICT JSON OUTPUT RULES (VIOLATE ANY = INVALID):\n\
-        - Output MUST be raw JSON only. NO markdown, NO code fences, NO backticks, NO explanation.\n\
-        - MUST start with BEGIN_SAPPHIRE_PLAN_JSON on its own line and end with END_SAPPHIRE_PLAN_JSON on its own line.\n\
-        - NOTHING outside those two markers. Not even a single word before or after.\n\
-        - All strings use double quotes only. No single quotes. No trailing commas.\n\
-        - NO newlines inside string values. Use spaces only.\n\
-        - All arrays are actual JSON arrays [...], never strings.\n\
-        - The entire block between markers MUST parse as valid JSON on first try.\n\
-        - Do NOT wrap JSON in ```json or ``` or any markdown formatting.\n\
+        CRITICAL RULE — TASK DECOMPOSITION (the #1 failure mode):\n\
+        - You MUST give every worker a DIFFERENT explicit_task. No two workers do the same thing.\n\
+        - You MUST give every worker a DIFFERENT owned_scope. No two workers touch the same files.\n\
+        - You MUST give every worker a DIFFERENT starting_angle. Each enters from a different entry point.\n\
+        - If the mission has multiple steps, you MUST split them across workers — NOT copy all steps to every worker.\n\
+        - Each worker handles ONE slice of the work, not the entire mission.\n\
+        - If you copy-paste the same task to all workers, the mission FAILS immediately.\n\
         \n\
-        LENGTH RULES:\n\
-        - EVERY string field must be 10 words or fewer.\n\
-        - Total JSON must stay under 2000 characters.\n\
-        - Be dense and actionable. No filler words.\n\
+        WHAT GOOD DECOMPOSITION LOOKS LIKE (8 workers for \"build a calculator\"):\n\
+        Worker 1 (Engineer-1, software-engineer): Build the expression PARSER — tokenizes input, \
+          builds AST, handles operator precedence. Files: src/parser/, src/tokenizer.rs\n\
+        Worker 2 (Engineer-2, software-engineer): Build the evaluation ENGINE — walks AST, computes \
+          results, handles errors. Files: src/engine/, src/evaluator.rs\n\
+        Worker 3 (Engineer-3, software-engineer): Build the CLI REPL — reads stdin, calls engine, \
+          displays output, handles quit. Files: src/cli/, src/main.rs\n\
+        Worker 4 (QA-1, testing-and-automation-engineer): Write comprehensive tests for parser, \
+          engine, CLI. Files: tests/parser_tests.rs, tests/engine_tests.rs\n\
+        Worker 5 (Security-1, security-engineer): Security audit of parser — injection vectors, \
+          overflow attacks, edge cases. Files: threat-model.md only\n\
+        Worker 6 (Architect-1, architecture-engineer): Architecture review — module boundaries, \
+          API contracts, extensibility. Files: architecture-review.md only\n\
+        Worker 7 (Designer-1, designer-engineer): UX design — error messages, help system, \
+          output formatting. Files: ux-design.md only\n\
+        Worker 8 (Product-1, product-engineer): Product spec — user stories, acceptance criteria, \
+          MVP scope. Files: product-spec.md only\n\
         \n\
-        EXACT JSON EXAMPLE (follow this structure, NOT the specific roles — choose roles based on YOUR analysis of the mission):\n\
+        WHAT FAILURE LOOKS LIKE (plan will be REJECTED):\n\
+        - All 8 workers get \"build a calculator\" → REJECTED (same task to everyone)\n\
+        - All 8 workers get src/ as their scope → REJECTED (same files)\n\
+        - Workers have slightly reworded versions of the same task → REJECTED\n\
+        \n\
+        OUTPUT FORMAT — EXACTLY THIS, NOTHING ELSE:\n\
         BEGIN_SAPPHIRE_PLAN_JSON\n\
-        {{\"mission_rewrite\":\"<10 word mission summary>\",\"team_activation\":[{{\"role_type\":\"<analyze mission — pick from 15 roles>\",\"display_name\":\"<Role-Type-N>\",\"reason\":\"<why THIS role for THIS mission>\"}}],\"workstreams\":[{{\"id\":\"<short id>\",\"name\":\"<workstream name>\",\"execution\":\"parallel|dependent|validation|integration\",\"owned_scope\":\"<what files/areas>\",\"success_criteria\":[\"<criterion>\"],\"depends_on\":[]}}],\"risk_map\":[{{\"zone\":\"<area>\",\"risk\":\"<risk type>\",\"mitigation\":\"<how to prevent>\"}}],\"worker_packets\":[{{\"worker_id\":\"<display name>\",\"role\":\"<Role Title>\",\"role_type\":\"<same as team_activation>\",\"display_name\":\"<same as team_activation>\",\"starting_angle\":\"<unique approach>\",\"owned_scope\":\"<files/areas>\",\"explicit_task\":\"<what to do>\",\"out_of_scope\":\"<what NOT to touch>\",\"definition_of_done\":[\"<criteria>\"],\"required_evidence\":[\"<proof>\"],\"blocker_protocol\":\"report blockers immediately\",\"conflict_warning\":\"claim files first\",\"communication_rules\":[\"mail blockers\"],\"validation_standard\":[\"pass checks\"],\"expected_output_format\":[\"summary\"]}}],\"supervision_strategy\":\"<tight|normal|loose>\"}}\n\
+        <valid JSON object>\n\
         END_SAPPHIRE_PLAN_JSON\n\
         \n\
-        CRITICAL: The JSON example above shows the STRUCTURE only. Do NOT copy the role_types from the example. Analyze the actual mission and activate ONLY the roles that the mission genuinely needs. A docs-only mission might need only software-engineer. A security audit needs security-engineer. A full feature needs multiple roles. YOU decide based on the mission, not the example.\n\
+        HARD RULES (violate any = plan rejected):\n\
+        1. Raw JSON only between the markers. No markdown fences. No prose before BEGIN or after END.\n\
+        2. EXACTLY {worker_count} worker_packets. Not one more. Not one less.\n\
+        3. role_type must be one of: software-engineer, research-engineer, validation-engineer, architecture-engineer, security-engineer, debug-and-review-engineer, testing-and-automation-engineer, designer-engineer, sales-engineer, solutions-engineer, customer-success-engineer, product-engineer, product-manager, revenue-engineer, compliance-engineer\n\
+        4. display_name uses function-first naming: Engineer-N, QA-N, Security-N, Architect-N, Designer-N, Product-N, Validator-N, Reviewer-N, Researcher-N, etc.\n\
+        5. execution must be one of: parallel, dependent, validation, integration\n\
+        6. Every JSON field must be present. No missing fields. No nulls.\n\
+        7. Arrays must be arrays (e.g. definition_of_done is [\"item1\", \"item2\"]), never a string.\n\
+        8. JSON must be valid. No trailing commas. No single quotes. No unescaped newlines in strings.\n\
+        9. String values must be concise (20 words or fewer each).\n\
         \n\
-        Rules:\n\
-        - You are planning for EXACTLY {worker_count} visible worker terminals.\n\
-        - Worker packet count must equal {worker_count}.\n\
-        - Do NOT invent extra workers, stewards, docs custodians, alternates, backups, or helper slots.\n\
-        - There are exactly 15 role TYPES available. Each type can have MULTIPLE instances. For example: 5 software-engineers = Engineer-1, Engineer-2, Engineer-3, Engineer-4, Engineer-5. The numeric suffix means you can spawn as many of any role type as the mission needs.\n\
-        - role_type must be one of these 15 types: software-engineer, research-engineer, validation-engineer, architecture-engineer, security-engineer, debug-and-review-engineer, testing-and-automation-engineer, designer-engineer, sales-engineer, solutions-engineer, customer-success-engineer, product-engineer, product-manager, revenue-engineer, compliance-engineer\n\
-        - display_name uses function-first naming with numeric identity: Engineer-N (software-engineer), Designer-N (designer-engineer), Reviewer-N (debug-and-review-engineer), Architect-N (architecture-engineer), Security-N (security-engineer), Validator-N (validation-engineer), QA-N (testing-and-automation-engineer), Researcher-N (research-engineer), Sales-N (sales-engineer), Solutions-N (solutions-engineer), CustomerSuccess-N (customer-success-engineer), Product-N (product-engineer), ProductManager-N (product-manager), Revenue-N (revenue-engineer), Compliance-N (compliance-engineer)\n\
-        - For go-to-market work, bias toward enterprise B2B, high-ticket, high-margin selling. Reject B2C fluff, low-value volume motions, and vague sales theater.\n\
-        - Supervisor analyzes the mission and activates ONLY the role types the mission genuinely needs. You can pick 1 role type and spawn all {worker_count} workers as that type, OR pick 5 types and distribute workers across them. YOU decide the mix.\n\
-        - A coding-heavy mission might need multiple software-engineers. A security audit might need security-engineers plus software-engineers. A documentation mission might need software-engineers plus a designer-engineer.\n\
-        - Each packet has materially different starting_angle — even same-type workers must attack different slices.\n\
-        - execution must be one of: parallel, dependent, validation, integration.\n\
-        - Output EXACTLY {worker_count} worker_packets. Not {worker_count}+1. Not extra alternates. Not optional backups.\n\
-        - If you think of extra workers, DO NOT include them. Trim the plan to EXACTLY {worker_count} worker_packets.\n\
-        - If the mission could use more workers than {worker_count}, compress the plan. Keep only the highest-leverage {worker_count} worker_packets.\n\
+        STRUCTURE EXAMPLE (this shows the SHAPE, not the content — analyze YOUR mission and produce genuinely different tasks):\n\
+        BEGIN_SAPPHIRE_PLAN_JSON\n\
+        {{\n  \"mission_rewrite\": \"Build a calculator with parser, engine, CLI, tests, security audit, architecture review, UX design, and product spec\",\n  \
+        \"team_activation\": [\n    {{\"role_type\": \"software-engineer\", \"display_name\": \"Engineer-1\", \"reason\": \"Parser implementation\"}},\n    {{\"role_type\": \"software-engineer\", \"display_name\": \"Engineer-2\", \"reason\": \"Evaluation engine\"}},\n    {{\"role_type\": \"testing-and-automation-engineer\", \"display_name\": \"QA-1\", \"reason\": \"Test coverage\"}}\n  ],\n  \
+        \"workstreams\": [\n    {{\"id\": \"ws-1\", \"name\": \"Expression parser\", \"execution\": \"parallel\", \"owned_scope\": \"src/parser/\", \"success_criteria\": [\"Parses expressions with correct precedence\"], \"depends_on\": []}},\n    {{\"id\": \"ws-2\", \"name\": \"Evaluation engine\", \"execution\": \"dependent\", \"owned_scope\": \"src/engine/\", \"success_criteria\": [\"Evaluates parsed expressions\"], \"depends_on\": [\"ws-1\"]}},\n    {{\"id\": \"ws-3\", \"name\": \"Test coverage\", \"execution\": \"validation\", \"owned_scope\": \"tests/\", \"success_criteria\": [\"90% coverage\"], \"depends_on\": [\"ws-1\", \"ws-2\"]}}\n  ],\n  \
+        \"risk_map\": [\n    {{\"zone\": \"API contract\", \"risk\": \"Engine and parser disagree on input/output format\", \"mitigation\": \"Define API contract before either worker starts\"}}\n  ],\n  \
+        \"worker_packets\": [\n    {{\"worker_id\": \"Engineer-1\", \"role\": \"Software Engineer\", \"role_type\": \"software-engineer\", \"display_name\": \"Engineer-1\", \"starting_angle\": \"Own the parser. Start with tokenization, then AST, then precedence.\", \"owned_scope\": \"src/parser/, src/tokenizer.rs\", \"explicit_task\": \"Build the expression parser: tokenize input, build AST, handle operator precedence and parenthesized expressions.\", \"out_of_scope\": \"Do not implement evaluation, CLI, tests, or documentation.\", \"definition_of_done\": [\"Parser handles all operators\", \"Clear errors for invalid input\"], \"required_evidence\": [\"Unit tests for each operator\", \"Error output for bad input\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Claim files before editing. Do not touch src/engine/ or tests/.\", \"communication_rules\": [\"Mail Engineer-2 if the AST shape affects the evaluator.\"], \"validation_standard\": [\"All parser tests pass\"], \"expected_output_format\": [\"Parser API summary\"]}},\n    {{\"worker_id\": \"Engineer-2\", \"role\": \"Software Engineer\", \"role_type\": \"software-engineer\", \"display_name\": \"Engineer-2\", \"starting_angle\": \"Own the evaluator. Start with the AST walk algorithm.\", \"owned_scope\": \"src/engine/, src/evaluator.rs\", \"explicit_task\": \"Build the evaluation engine: walk the AST from the parser, compute results, handle division by zero and overflow errors.\", \"out_of_scope\": \"Do not implement parsing, CLI, tests, or documentation. Call the parser API only.\", \"definition_of_done\": [\"Engine evaluates any valid expression\", \"Clear errors for invalid cases\"], \"required_evidence\": [\"Tests for basic arithmetic\", \"Error output for edge cases\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Claim files before editing. Do not touch src/parser/ or tests/.\", \"communication_rules\": [\"Mail Engineer-1 if the AST shape is unclear.\"], \"validation_standard\": [\"All engine tests pass\"], \"expected_output_format\": [\"Engine API summary\"]}},\n    {{\"worker_id\": \"QA-1\", \"role\": \"Testing & Automation Engineer\", \"role_type\": \"testing-and-automation-engineer\", \"display_name\": \"QA-1\", \"starting_angle\": \"Build the test harness. Start with engine tests, then parser tests.\", \"owned_scope\": \"tests/parser_tests.rs, tests/engine_tests.rs\", \"explicit_task\": \"Write comprehensive tests for the parser and engine: unit tests, edge cases, property-based tests for arithmetic laws.\", \"out_of_scope\": \"Do not implement parser, engine, CLI, or documentation. Write tests only.\", \"definition_of_done\": [\"90% coverage on parser and engine\", \"All edge cases tested\"], \"required_evidence\": [\"Coverage report\", \"At least 20 test cases\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Do not modify src/ code. Write tests against public API only.\", \"communication_rules\": [\"Mail Engineer-1 if a test reveals a parser bug.\"], \"validation_standard\": [\"All tests pass on clean checkout\"], \"expected_output_format\": [\"Coverage report with per-module breakdown\"]}}\n  ],\n  \
+        \"supervision_strategy\": \"Parser first, then engine, then tests in parallel. QA validates both.\"\n}}\n\
+        END_SAPPHIRE_PLAN_JSON\n\
         \n\
-        Mission:\n\
-        {mission}\n",
+        REMEMBER: Analyze the mission below. Split it into {worker_count} genuinely different pieces.\n\
+        If you give the same task to multiple workers, the plan will be REJECTED.\n\
+        If your workstreams have identical scopes, the plan will be REJECTED.\n\
+        Each worker gets ONE slice — not the whole mission.\n\
+        \n\
+        Mission: {mission}"
     )
 }
 
@@ -700,7 +726,52 @@ fn extract_supervisor_plan_impl(raw_output: &str) -> Option<MissionPlan> {
     .or_else(|| extract_fenced_json(raw_output))
     .or_else(|| extract_plan_like_json(raw_output))?;
     let envelope = serde_json::from_str::<SupervisorPlanEnvelope>(&json).ok()?;
-    envelope.try_into_plan().ok().map(sanitize_supervisor_plan)
+    let plan = envelope.try_into_plan().ok()?;
+    let plan = sanitize_supervisor_plan(plan);
+    // Strict differentiation: reject if worker packets are too similar
+    validate_packet_differentiation(&plan)?;
+    Some(plan)
+}
+
+/// Validates that all worker packets have genuinely different tasks and scopes.
+/// Returns None if packets are too similar (plan will be rejected).
+fn validate_packet_differentiation(plan: &MissionPlan) -> Option<()> {
+    if plan.worker_packets.len() <= 1 {
+        return Some(());
+    }
+    let packets = &plan.worker_packets;
+    for i in 0..packets.len() {
+        for j in (i + 1)..packets.len() {
+            let task_sim = text_similarity(&packets[i].explicit_task, &packets[j].explicit_task);
+            let scope_sim = text_similarity(&packets[i].owned_scope, &packets[j].owned_scope);
+            // If both task AND scope are >70% similar, the packets are essentially the same
+            if task_sim > 0.7 && scope_sim > 0.7 {
+                tracing::warn!(
+                    worker_i = packets[i].display_name,
+                    worker_j = packets[j].display_name,
+                    task_similarity = task_sim,
+                    scope_similarity = scope_sim,
+                    "supervisor plan rejected: worker packets too similar"
+                );
+                return None;
+            }
+        }
+    }
+    Some(())
+}
+
+/// Computes text similarity (0.0 to 1.0) based on shared word overlap.
+fn text_similarity(a: &str, b: &str) -> f64 {
+    let a_lower = a.to_ascii_lowercase();
+    let b_lower = b.to_ascii_lowercase();
+    let words_a: std::collections::HashSet<_> = a_lower.split_whitespace().collect();
+    let words_b: std::collections::HashSet<_> = b_lower.split_whitespace().collect();
+    if words_a.is_empty() && words_b.is_empty() { return 1.0; }
+    if words_a.is_empty() || words_b.is_empty() { return 0.0; }
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+    if union == 0 { return 0.0; }
+    intersection as f64 / union as f64
 }
 
 fn extract_supervisor_action_impl(raw_output: &str) -> Option<SupervisorAction> {
@@ -727,8 +798,13 @@ fn extract_supervisor_action_impl(raw_output: &str) -> Option<SupervisorAction> 
 fn extract_final_envelope_impl(raw_output: &str) -> Option<FinalEnvelope> {
     let captures = final_envelope_regex().captures_iter(raw_output).last()?;
     let state = map_state_token(captures.name("state")?.as_str())?;
+    let ready_for_cleanup = captures
+        .name("cleanup")
+        .map(|v| matches!(v.as_str().trim().to_ascii_lowercase().as_str(), "yes" | "true"))
+        .unwrap_or(false);
     Some(FinalEnvelope {
         state,
+        ready_for_cleanup,
         summary: captures.name("summary")?.as_str().trim().to_owned(),
     })
 }
@@ -1397,7 +1473,8 @@ mod tests {
         assert!(prompt.contains("# Software Engineer"));
         assert!(prompt.contains("## Mission"));
         assert!(prompt.contains("## Core Responsibilities"));
-        assert!(prompt.contains("Role Type: software-engineer"));
+        assert!(prompt.contains("Worker:"));
+        assert!(prompt.contains("software-engineer"));
         assert!(prompt.contains("## Sapphire Control Protocol"));
         assert!(prompt.lines().count() <= 85);
     }

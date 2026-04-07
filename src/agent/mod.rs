@@ -76,8 +76,11 @@ impl AgentKind {
         let (program, base_args, prompt_delay, startup_input, startup_rules, submit_mode) = match self {
             Self::Qwen => (
                 "qwen",
-                vec!["--approval-mode".to_owned(), "yolo".to_owned()],
-                Duration::from_millis(9000),
+                vec![
+                    "--approval-mode".to_owned(),
+                    "yolo".to_owned(),
+                ],
+                Duration::from_millis(14000),
                 Some((Duration::from_millis(8000), "\n".to_owned())),
                 vec![StartupAutomationRule::new(
                     "qwen_ide_prompt",
@@ -279,7 +282,7 @@ mod tests {
             spec.args,
             vec!["--approval-mode".to_owned(), "yolo".to_owned()]
         );
-        assert_eq!(spec.prompt_delay, Duration::from_millis(9000));
+        assert_eq!(spec.prompt_delay, Duration::from_millis(14000));
         assert_eq!(
             spec.startup_input,
             Some((Duration::from_millis(8000), "\n".to_owned()))

@@ -1,4 +1,5 @@
 mod app;
+mod control_status;
 mod data;
 mod markdown;
 mod render;

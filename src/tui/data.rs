@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::model::{MissionSnapshot, SessionRole, SessionState, WorkerSnapshot};
 use crate::store::Store;
 
+use super::control_status::{ControlStatusSnapshot, parse_control_status};
 use super::time::format_elapsed;
 
 #[derive(Debug, Clone)]
@@ -138,10 +139,15 @@ impl DashboardDataSource {
         let supervisor_summary = self.store.latest_supervisor_summary(mission.id)?;
         let control_status = fs::read_to_string(&self.control_status_path).ok();
 
+        let live_status = control_status
+            .as_deref()
+            .map(parse_control_status)
+            .unwrap_or_default();
+
         let worker_views: Vec<WorkerView> = workers
             .iter()
             .filter(|worker| worker.session.role == SessionRole::Worker)
-            .map(worker_view)
+            .map(|worker| worker_view(worker, &live_status))
             .collect();
 
         let health = HealthView {
@@ -176,11 +182,22 @@ impl DashboardDataSource {
         let supervisor_view = workers
             .iter()
             .find(|w| w.session.role == SessionRole::Supervisor)
-            .map(|s| SupervisorView {
-                name: s.session.name.clone(),
-                state: s.session.status.as_str().to_owned(),
-                summary: s.session.last_summary.clone().unwrap_or_default(),
-                pending_decisions: Vec::new(),
+            .map(|s| {
+                if let Some(live) = live_status.supervisor.as_ref() {
+                    SupervisorView {
+                        name: live.name.clone(),
+                        state: live.state.clone(),
+                        summary: live.summary.clone(),
+                        pending_decisions: Vec::new(),
+                    }
+                } else {
+                    SupervisorView {
+                        name: s.session.name.clone(),
+                        state: s.session.status.as_str().to_owned(),
+                        summary: s.session.last_summary.clone().unwrap_or_default(),
+                        pending_decisions: Vec::new(),
+                    }
+                }
             });
 
         let markdown = compose_supervisor_markdown(
@@ -242,7 +259,8 @@ impl DashboardDataSource {
     }
 }
 
-fn worker_view(worker: &WorkerSnapshot) -> WorkerView {
+fn worker_view(worker: &WorkerSnapshot, live_status: &ControlStatusSnapshot) -> WorkerView {
+    let live = live_status.workers.get(&worker.session.name);
     WorkerView {
         id: worker.session.id,
         name: worker.session.name.clone(),
@@ -251,12 +269,18 @@ fn worker_view(worker: &WorkerSnapshot) -> WorkerView {
             .as_ref()
             .map(|packet| packet.role.clone())
             .unwrap_or_else(|| worker.session.role_string().to_owned()),
-        state: worker.session.status.as_str().to_owned(),
-        summary: worker
-            .session
-            .last_summary
-            .clone()
-            .unwrap_or_else(|| "Working...".to_owned()),
+        state: live
+            .map(|status| status.state.clone())
+            .unwrap_or_else(|| worker.session.status.as_str().to_owned()),
+        summary: live
+            .map(|status| status.summary.clone())
+            .unwrap_or_else(|| {
+                worker
+                    .session
+                    .last_summary
+                    .clone()
+                    .unwrap_or_else(|| "Working...".to_owned())
+            }),
         focus: worker
             .packet
             .as_ref()
@@ -532,17 +556,10 @@ fn extract_value(part: &str, key: &str) -> Option<usize> {
 }
 
 fn extract_supervisor_mode(line: &str) -> String {
-    // Look for [Mode] in "Supervisor: name [Mode] summary"
-    if let Some(start) = line.find('[') {
-        if let Some(end) = line[start..].find(']') {
-            return line[start + 1..start + end].to_owned();
-        }
-    }
-    // Fallback: look for common mode keywords
     let lower = line.to_lowercase();
-    if lower.contains("degraded") {
+    if lower.contains("mode=degraded") || lower.contains(" degraded ") || lower.ends_with(" degraded") {
         return "Degraded".to_owned();
-    } else if lower.contains("recovering") {
+    } else if lower.contains("mode=recovering") || lower.contains(" recovering ") || lower.ends_with(" recovering") {
         return "Recovering".to_owned();
     }
     "Healthy".to_owned()

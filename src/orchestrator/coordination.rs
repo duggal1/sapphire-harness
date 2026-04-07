@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use blake3::hash;
 
-use crate::model::{SessionRole, SessionState};
+use crate::model::SessionRole;
 use crate::protocol::MailDirective;
 use uuid::Uuid;
 
-use super::{ActiveSession, PendingMail};
+use super::{live_state, ActiveSession, PendingMail};
 
 pub const MAX_CC_RECIPIENTS: usize = 3;
 pub const MAX_ACTIVE_THREADS_PER_WORKER: usize = 8;
@@ -229,6 +229,8 @@ pub fn summarize_pods(
     pending_mail: &HashMap<Uuid, PendingMail>,
 ) -> Vec<PodSummary> {
     let mut pods: HashMap<String, PodSummary> = HashMap::new();
+    let now = std::time::Instant::now();
+    let snapshot = live_state::Snapshot::build(active_sessions, now);
 
     for session in active_sessions.values() {
         if session.record.role != SessionRole::Worker {
@@ -242,14 +244,7 @@ pub fn summarize_pods(
             open_threads: 0,
         });
         entry.members.push(session.record.name.clone());
-        if matches!(
-            session.state,
-            SessionState::Blocked
-                | SessionState::Stalled
-                | SessionState::Contradictory
-                | SessionState::NeedsRetry
-                | SessionState::WrongDirection
-        ) {
+        if snapshot.counts_as_problem(session) {
             entry.blocked_members.push(session.record.name.clone());
         }
     }

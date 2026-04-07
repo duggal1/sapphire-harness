@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::adapter::{
@@ -39,6 +39,15 @@ mod supervisor;
 mod coordination;
 mod memory;
 mod meetings;
+mod mission_profile;
+mod prompt_contracts;
+mod live_state;
+mod launch_prompt;
+mod communication_policy;
+mod enforcement;
+mod finalization;
+
+use mission_profile::MissionProfile;
 
 pub struct Orchestrator {
     store: Store,
@@ -77,6 +86,9 @@ struct ActiveSession {
     last_output_at: Instant,
     output_chunks: usize,
     directive_count: usize,
+    initial_status_received: bool,
+    output_chunks_at_last_status: usize,
+    reported_overlap: Option<String>,
     stall_count: usize,
     restart_count: usize,
     restart_at: Option<Instant>,
@@ -118,12 +130,20 @@ struct ActiveSession {
     queued_prompt_keys: HashSet<String>,
     recent_prompt_keys: VecDeque<(String, Instant)>,
     last_prompt_sent_at: Option<Instant>,
+    launch_prompt_sent: bool,
+    cleanup_authorized: bool,
     /// Last authoritative status-file update seen for this worker.
     last_status_update_at: Option<Instant>,
     /// Last modified timestamp observed for the status file.
     last_status_file_modified: Option<SystemTime>,
+    /// Cached tmux health snapshot for this session.
+    last_tmux_health: Option<tmux::SessionHealth>,
+    last_tmux_health_checked_at: Option<Instant>,
     /// Dedup key for supervisor notices sent into the live supervisor session.
     last_supervisor_notice_key: Option<String>,
+    /// Recent supervisor notice keys so identical unresolved issues are not
+    /// re-sent just because other notice types happened in between.
+    recent_supervisor_notice_keys: VecDeque<(String, Instant)>,
     /// Dedup key for periodic supervisor state cards.
     last_supervisor_state_card_key: Option<String>,
     /// Zombie debounce: consecutive cycles detected as zombie before restart.
@@ -186,6 +206,7 @@ enum SupervisorDecisionKind {
     Validation,
     StallRecovery,
     LowConfidenceRecovery,
+    OverlapRecovery,
 }
 
 impl SupervisorDecisionKind {
@@ -194,6 +215,7 @@ impl SupervisorDecisionKind {
             Self::Validation => "validation",
             Self::StallRecovery => "stall_recovery",
             Self::LowConfidenceRecovery => "low_confidence_recovery",
+            Self::OverlapRecovery => "overlap_recovery",
         }
     }
 }
@@ -202,6 +224,9 @@ struct PendingSupervisorDecision {
     kind: SupervisorDecisionKind,
     target_session_id: Uuid,
     reason: String,
+    queued_at: Instant,
+    last_notified_at: Instant,
+    notice_count: usize,
 }
 
 struct RecentFailure {
@@ -218,6 +243,7 @@ enum SupervisorMode {
 }
 
 struct ControlSurface {
+    state_dir: PathBuf,
     status_file: PathBuf,
     dashboard_file: PathBuf,
     transcript_dir: PathBuf,
@@ -240,12 +266,31 @@ struct PlanOutcome {
 }
 
 impl Orchestrator {
+    pub fn open(state_or_db_path: &Path) -> Result<Self> {
+        // Accept either state dir or db path (state_dir/sapphire.sqlite3)
+        let state_dir = if state_or_db_path.is_dir() {
+            state_or_db_path.to_owned()
+        } else if let Some(parent) = state_or_db_path.parent() {
+            parent.to_owned()
+        } else {
+            state_or_db_path.to_owned()
+        };
+
+        ensure_state_tree(&state_dir)?;
+        ensure_state_tree(&hidden_state_dir(&state_dir))?;
+
+        let store = Store::open(&state_dir)?;
+        Ok(Self {
+            store,
+            prompts: PromptLibrary::load(),
+        })
+    }
+
     pub fn bootstrap(config: &LaunchConfig) -> Result<Self> {
         ensure_state_tree(&config.state_dir)?;
         ensure_state_tree(&hidden_state_dir(&config.state_dir))?;
 
-        let db_path = database_path(config);
-        let store = Store::open(&db_path)?;
+        let store = Store::open(&config.state_dir)?;
         Ok(Self {
             store,
             prompts: PromptLibrary::load(),
@@ -253,10 +298,10 @@ impl Orchestrator {
     }
 
     pub async fn launch(&self, config: LaunchConfig) -> Result<LaunchSummary> {
-        let db_path = database_path(&config);
         let mission_id = Uuid::new_v4();
         let agents_bootstrap =
             ensure_agents_bootstrap(&config.repo, &self.prompts)?;
+        let mission_profile = MissionProfile::from_launch(&config);
         let placeholder_plan = pending_supervisor_plan(&config.mission);
 
         let mission_record = MissionRecord {
@@ -300,6 +345,19 @@ impl Orchestrator {
                 )
             },
         )?;
+        self.store.append_summary(
+            mission_id,
+            None,
+            "mission_profile",
+            format!(
+                "coordination_focused={} deterministic_planning={} lean_supervision={} repair_supervisor={} state_cards={}",
+                mission_profile.coordination_focused,
+                mission_profile.deterministic_planning,
+                mission_profile.lean_supervision,
+                mission_profile.enable_repair_supervisor,
+                mission_profile.enable_state_cards,
+            ),
+        )?;
 
         let mut notes = vec![
             format!(
@@ -318,10 +376,11 @@ impl Orchestrator {
 
         let supervisor_name = "supervisor-01".to_owned();
         let mut supervisor_spec = config.supervisor_agent.build_launch_spec(
-            &supervisor_runtime_root(&config.state_dir),
+            &config.repo,
             &config.state_dir,
             &config.supervisor_args,
         );
+        supervisor_spec = harden_supervisor_launch_spec(config.supervisor_agent, supervisor_spec);
         supervisor_spec.surface_label = supervisor_name.clone();
         let supervisor_session = SessionRecord {
             id: Uuid::new_v4(),
@@ -362,20 +421,19 @@ impl Orchestrator {
         if !config.dry_run {
             notes.push("startup: direct live launch without preflight gate".to_owned());
         }
-        let plan_outcome = match self
-            .plan_with_supervisor(mission_id, &config, &supervisor_session)
-            .await
-        {
-            Ok(plan_outcome) => plan_outcome,
-            Err(error) => {
-                self.store.append_summary(
-                    mission_id,
-                    Some(supervisor_session.id),
-                    "plan_failure",
-                    format!("supervisor planning failed: {error}"),
-                )?;
-                return Err(error);
+        let plan_outcome = if mission_profile.deterministic_planning {
+            PlanOutcome {
+                plan: mission_profile::deterministic_plan_for_mission(
+                    &config.mission,
+                    config.worker_count,
+                    mission_profile,
+                ),
+                source: "deterministic",
             }
+        } else {
+            // NO FALLBACK. Supervisor must produce a valid plan or the launch fails.
+            self.plan_with_supervisor(mission_id, &config, &supervisor_session)
+                .await?
         };
         let planned_worker_count = plan_outcome.plan.worker_packets.len();
         let effective_plan = plan_outcome.plan.clone();
@@ -404,6 +462,11 @@ impl Orchestrator {
             config.worker_count,
         );
         write_prompt_file(&config.state_dir, &supervisor_name, &supervisor_prompt)?;
+        let supervisor_launch_prompt = launch_prompt::supervisor_loader_prompt(
+            config.supervisor_agent,
+            &launch_prompt::prompt_file_path(&config.state_dir, &supervisor_name),
+            &supervisor_name,
+        );
 
         let worker_adapter = adapter_for(config.worker_agent);
         let mut session_names = Vec::with_capacity(config.worker_count + 1);
@@ -418,10 +481,42 @@ impl Orchestrator {
             };
             let base_prompt =
                 worker_adapter.build_assignment_prompt(&self.prompts, &config.mission, packet);
-            let prompt =
-                render_worker_prompt_with_agents(base_prompt, &agents_bootstrap, packet, config.git_remote.as_deref());
-            write_prompt_file(&config.state_dir, &worker_name, &prompt)?;
 
+            // Load persistent memory from previous missions — engineer remembers what they did.
+            let memory_block = self
+                .store
+                .agent_memory()
+                .format_history_for_injection(&worker_name, &packet.role_type, 3)
+                .ok()
+                .flatten();
+
+            let full_prompt = render_worker_prompt_with_agents(
+                base_prompt,
+                &agents_bootstrap,
+                &config.state_dir,
+                packet,
+                config.git_remote.as_deref(),
+                memory_block.as_deref(),
+            );
+            write_prompt_file(&config.state_dir, &worker_name, &full_prompt)?;
+            status_files::write_bootstrap_status_files(
+                &config
+                    .state_dir
+                    .join("workers")
+                    .join(&worker_name)
+                    .join("status.json"),
+                &hidden_state_dir(&config.state_dir)
+                    .join("workers")
+                    .join(&worker_name)
+                    .join("status.json"),
+                "assignment delivered; awaiting worker update",
+            )?;
+            let live_prompt = launch_prompt::worker_terminal_prompt(
+                &config.state_dir,
+                &launch_prompt::prompt_file_path(&config.state_dir, &worker_name),
+                &config.mission,
+                packet,
+            );
             let mut launch_spec = config.worker_agent.build_launch_spec(
                 &config.repo,
                 &config.state_dir,
@@ -467,7 +562,7 @@ impl Orchestrator {
             worker_launches.push(WorkerLaunch {
                 session,
                 launch_spec,
-                prompt,
+                prompt: live_prompt,
                 packet: packet.clone(),
                 task_id: Some(task_id),
             });
@@ -483,6 +578,7 @@ impl Orchestrator {
             self.store
                 .update_mission_status(mission_id, MissionStatus::Running)?;
             let control_surface = ControlSurface {
+                state_dir: config.state_dir.clone(),
                 status_file: config.state_dir.join("control/status.txt"),
                 dashboard_file: config.state_dir.join("control/dashboard.txt"),
                 transcript_dir: config.state_dir.join("transcripts"),
@@ -502,13 +598,14 @@ impl Orchestrator {
                     mission_id,
                     &config,
                     supervisor_session.clone(),
-                    supervisor_task.id,
-                    supervisor_spec,
-                    supervisor_prompt,
-                    worker_launches,
-                    &control_surface,
-                )
-                .await?;
+                supervisor_task.id,
+                supervisor_spec,
+                supervisor_launch_prompt,
+                worker_launches,
+                mission_profile,
+                &control_surface,
+            )
+            .await?;
             notes.push(format!(
                 "watchdog: events={} directives={} mail={} validation={} stalls={} lease_conflicts={} protocol_reminders={} supervisor_health={} supervisor_fallbacks={}",
                 stats.runtime_events,
@@ -530,7 +627,6 @@ impl Orchestrator {
             mission_id,
             repo: config.repo,
             state_dir: config.state_dir.clone(),
-            db_path,
             dry_run: config.dry_run,
             worker_agent: config.worker_agent,
             supervisor_agent: config.supervisor_agent,
@@ -543,14 +639,6 @@ impl Orchestrator {
                 .map(|workstream| workstream.name.clone())
                 .collect(),
             notes,
-        })
-    }
-
-    pub fn open(db_path: &std::path::Path) -> Result<Self> {
-        let store = Store::open(db_path)?;
-        Ok(Self {
-            store,
-            prompts: PromptLibrary::load(),
         })
     }
 
@@ -780,6 +868,11 @@ impl Orchestrator {
             &supervisor_snapshot.session.name,
             &supervisor_prompt,
         )?;
+        let supervisor_launch_prompt = launch_prompt::supervisor_loader_prompt(
+            supervisor_snapshot.session.agent,
+            &launch_prompt::prompt_file_path(&state_dir, &supervisor_snapshot.session.name),
+            &supervisor_snapshot.session.name,
+        );
 
         let mut worker_launches = Vec::new();
         for worker in worker_snapshots {
@@ -788,23 +881,67 @@ impl Orchestrator {
                 .clone()
                 .context("resume requires persisted worker packet")?;
             let adapter = adapter_for(worker.session.agent);
+
+            // Load previous session memory for resume injection
+            let memory_context = self
+                .store
+                .agent_memory()
+                .format_for_resume(&snapshot.id, &worker.session.name)
+                .ok()
+                .flatten()
+                .map(|m| format!("\n\n{}\n\nContinue from your previous session. Do not repeat work you already completed.", m))
+                .unwrap_or_default();
+
             let base_prompt = format!(
-                "{}\n\nResume context:\n{}\n{}",
+                "{}\n\nResume context:\n{}\n{}{}",
                 adapter.build_assignment_prompt(&self.prompts, &snapshot.user_mission_raw, &packet),
                 worker
                     .session
                     .last_summary
                     .as_deref()
                     .unwrap_or("no prior summary"),
-                self.render_worker_replay(snapshot.id, &worker.session.id.to_string(), 8)?
+                self.render_worker_replay(snapshot.id, &worker.session.id.to_string(), 8)?,
+                memory_context,
             );
-            let worker_prompt =
-                render_worker_prompt_with_agents(base_prompt, &agents_bootstrap, &packet, git_remote.as_deref());
+
+            // Also load cross-mission memory — what this agent did in OTHER missions.
+            let cross_mission_memory = self
+                .store
+                .agent_memory()
+                .format_history_for_injection(&worker.session.name, &packet.role_type, 2)
+                .ok()
+                .flatten();
+
+            let worker_prompt = render_worker_prompt_with_agents(
+                base_prompt,
+                &agents_bootstrap,
+                &state_dir,
+                &packet,
+                git_remote.as_deref(),
+                cross_mission_memory.as_deref(),
+            );
             write_prompt_file(&state_dir, &worker.session.name, &worker_prompt)?;
+            status_files::write_bootstrap_status_files(
+                &state_dir
+                    .join("workers")
+                    .join(&worker.session.name)
+                    .join("status.json"),
+                &hidden_state_dir(&state_dir)
+                    .join("workers")
+                    .join(&worker.session.name)
+                    .join("status.json"),
+                "assignment delivered; awaiting worker update",
+            )?;
+            let live_prompt = launch_prompt::worker_terminal_prompt(
+                &state_dir,
+                &launch_prompt::prompt_file_path(&state_dir, &worker.session.name),
+                &snapshot.user_mission_raw,
+                &packet,
+            );
             worker_launches.push(WorkerLaunch {
                 session: worker.session.clone(),
                 launch_spec: rebuild_launch_spec(&worker.session, &repo, &state_dir),
-                prompt: worker_prompt,
+                prompt: live_prompt,
                 packet,
                 task_id: self.store.find_task_id(snapshot.id, worker.session.id)?,
             });
@@ -819,7 +956,6 @@ impl Orchestrator {
             worker_count: worker_launches.len(),
             repo: repo.clone(),
             mission: snapshot.user_mission_raw.clone(),
-            db_path: config.db_path.clone(),
             state_dir: state_dir.clone(),
             dry_run: false,
             stall_seconds: config.stall_seconds,
@@ -834,6 +970,7 @@ impl Orchestrator {
             git_remote,
         };
         let control_surface = ControlSurface {
+            state_dir: state_dir.clone(),
             status_file: state_dir.join("control/status.txt"),
             dashboard_file: state_dir.join("control/dashboard.txt"),
             transcript_dir: state_dir.join("transcripts"),
@@ -863,8 +1000,9 @@ impl Orchestrator {
                     .find_task_id(snapshot.id, supervisor_snapshot.session.id)?
                     .unwrap_or(Uuid::new_v4()),
                 rebuild_launch_spec(&supervisor_snapshot.session, &repo, &state_dir),
-                supervisor_prompt,
+                supervisor_launch_prompt,
                 worker_launches,
+                MissionProfile::from_launch(&live_config),
                 &control_surface,
             )
             .await?;
@@ -872,7 +1010,6 @@ impl Orchestrator {
             mission_id: snapshot.id,
             repo,
             state_dir: state_dir.clone(),
-            db_path: database_path(&live_config),
             dry_run: false,
             worker_agent: live_config.worker_agent,
             supervisor_agent: live_config.supervisor_agent,
@@ -925,13 +1062,17 @@ impl Orchestrator {
         }
 
         // Other agents: use PTY-based planning
-        let (planning_spec, prompt_embedded) = embed_initial_prompt_if_supported(
+        let planning_spec = harden_supervisor_launch_spec(
             config.supervisor_agent,
             config.supervisor_agent.build_launch_spec(
-                &supervisor_runtime_root(&config.state_dir),
+                &config.repo,
                 &config.state_dir,
                 &config.supervisor_args,
             ),
+        );
+        let (planning_spec, prompt_embedded) = embed_initial_prompt_if_supported(
+            config.supervisor_agent,
+            planning_spec,
             &planning_prompt,
         );
         let mut runtime = SessionRuntime::new();
@@ -944,7 +1085,7 @@ impl Orchestrator {
         }
 
         let started_at = Instant::now();
-        let timeout = Duration::from_secs(60);
+        let timeout = Duration::from_secs(120);
         let mut raw_buffer = String::new();
         let mut correction_sent = false;
         let mut hard_retry_sent = false;
@@ -1015,6 +1156,19 @@ impl Orchestrator {
         let worker_count = config.worker_count;
 
         let result = tokio::task::spawn_blocking(move || {
+            let plan_prompt_path = launch_prompt::prompt_file_path(&state_dir, "__supervisor_plan__");
+            write_string_to_file(&plan_prompt_path, &prompt)
+                .context("failed to persist supervisor planning brief")?;
+            let loader_prompt = format!(
+                "Read and execute this planning brief now:\n@{path}\n{path}\n\n\
+Rules:\n\
+- Ingest the brief once.\n\
+- Do not describe the brief.\n\
+- Output only one valid wrapped Sapphire plan block.\n\
+- Begin with BEGIN_SAPPHIRE_PLAN_JSON and end with END_SAPPHIRE_PLAN_JSON.\n\
+- No prose outside the markers.",
+                path = plan_prompt_path.display(),
+            );
             let mut cmd = std::process::Command::new("qwen");
             cmd.arg("--screen-reader");
             cmd.arg("--approval-mode");
@@ -1026,12 +1180,28 @@ impl Orchestrator {
             cmd.env("SAPPHIRE_SESSION_ROOT", state_dir.to_string_lossy().as_ref());
 
             let mut child = cmd.spawn().context("failed to spawn qwen for planning")?;
-            // Write prompt to stdin
             {
                 let mut stdin = child.stdin.take().context("failed to get stdin")?;
-                std::io::Write::write_all(&mut stdin, prompt.as_bytes())
-                    .context("failed to write planning prompt")?;
+                std::io::Write::write_all(&mut stdin, loader_prompt.as_bytes())
+                    .context("failed to write planning loader prompt")?;
                 drop(stdin); // Close stdin to signal EOF
+            }
+
+            let started = std::time::Instant::now();
+            loop {
+                if child
+                    .try_wait()
+                    .context("failed to poll qwen planning process")?
+                    .is_some()
+                {
+                    break;
+                }
+                if started.elapsed() >= Duration::from_secs(120) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!("qwen planning timed out after 120s");
+                }
+                std::thread::sleep(Duration::from_millis(250));
             }
 
             let output = child.wait_with_output().context("qwen planning failed")?;
@@ -1051,6 +1221,22 @@ impl Orchestrator {
                 worker_count,
                 "qwen",
             )?;
+
+            // Final gate: ensure packets are genuinely differentiated
+            if plan.worker_packets.len() > 1 {
+                let first = &plan.worker_packets[0];
+                for (i, packet) in plan.worker_packets.iter().enumerate().skip(1) {
+                    let task_sim = text_similarity_sim(&packet.explicit_task, &first.explicit_task);
+                    let scope_sim = text_similarity_sim(&packet.owned_scope, &first.owned_scope);
+                    if task_sim > 0.9 && scope_sim > 0.9 {
+                        anyhow::bail!(
+                            "supervisor produced non-differentiated worker packets: packet 1 and packet {} have near-identical tasks and scopes. Each worker must have a genuinely different task.",
+                            i + 1
+                        );
+                    }
+                }
+            }
+
             return Ok(PlanOutcome { plan, source: "supervisor" });
         }
 
@@ -1069,6 +1255,7 @@ impl Orchestrator {
         supervisor_spec: ProcessLaunchSpec,
         supervisor_prompt: String,
         worker_launches: Vec<WorkerLaunch>,
+        mission_profile: MissionProfile,
         control_surface: &ControlSurface,
     ) -> Result<WatchdogStats> {
         // Create tmux batch sessions (10 workers per session, from launch-codex-tabs.sh)
@@ -1114,53 +1301,61 @@ impl Orchestrator {
         let started_at = Instant::now();
         let primary_supervisor_id = supervisor_session.id;
         let repair_supervisor_name = "supervisor-02-repair".to_owned();
-        let repair_supervisor_prompt = supervisor::build_repair_supervisor_prompt(
-            &supervisor_prompt,
-            &supervisor_session.name,
-            &repair_supervisor_name,
-        );
-        write_prompt_file(
-            &config.state_dir,
-            &repair_supervisor_name,
-            &repair_supervisor_prompt,
-        )?;
-        let mut repair_supervisor_spec = supervisor_spec.clone();
-        repair_supervisor_spec.surface_label = repair_supervisor_name.clone();
-        let repair_supervisor_session = SessionRecord {
-            id: Uuid::new_v4(),
-            mission_id,
-            role: SessionRole::Supervisor,
-            ordinal: supervisor_session.ordinal + 1,
-            agent: supervisor_session.agent,
-            terminal_id: repair_supervisor_name.clone(),
-            name: repair_supervisor_name.clone(),
-            owned_scope: "standby repair supervision and takeover continuity".to_owned(),
-            status: SessionState::Booting,
-            launch_command: launch_command(
-                repair_supervisor_spec.program.as_str(),
-                &repair_supervisor_spec.args,
-            ),
-            last_heartbeat_at: Utc::now(),
-            last_summary: Some("Standby repair supervisor".to_owned()),
-        };
-        self.store.persist_session(&repair_supervisor_session, None)?;
-        let repair_supervisor_task = TaskRecord {
-            id: Uuid::new_v4(),
-            mission_id,
-            worker_id: repair_supervisor_session.id,
-            title: "Repair supervision".to_owned(),
-            description: "Stay synchronized, take over if the primary supervisor becomes unhealthy, and preserve mission continuity.".to_owned(),
-            status: "assigned".to_owned(),
-            priority: "high".to_owned(),
-            depends_on_json: "[]".to_owned(),
-            definition_of_done_json: serde_json::to_string(&vec![
-                "Primary supervisor failure detected".to_owned(),
-                "Repair takeover executed when needed".to_owned(),
-                "Mission continuity preserved".to_owned(),
-            ])?,
-        };
-        self.store.persist_task(&repair_supervisor_task)?;
-        let repair_supervisor_id = repair_supervisor_session.id;
+        let mut repair_supervisor_id = None;
+        let mut repair_supervisor_prompt = None;
+        let mut repair_supervisor_spec = None;
+        let mut repair_supervisor_session = None;
+        let mut repair_supervisor_task_id = None;
+        if mission_profile.enable_repair_supervisor {
+            let prompt = supervisor::build_repair_supervisor_prompt(
+                &supervisor_prompt,
+                &supervisor_session.name,
+                &repair_supervisor_name,
+            );
+            write_prompt_file(
+                &config.state_dir,
+                &repair_supervisor_name,
+                &prompt,
+            )?;
+            let mut spec = supervisor_spec.clone();
+            spec.surface_label = repair_supervisor_name.clone();
+            let session = SessionRecord {
+                id: Uuid::new_v4(),
+                mission_id,
+                role: SessionRole::Supervisor,
+                ordinal: supervisor_session.ordinal + 1,
+                agent: supervisor_session.agent,
+                terminal_id: repair_supervisor_name.clone(),
+                name: repair_supervisor_name.clone(),
+                owned_scope: "standby repair supervision and takeover continuity".to_owned(),
+                status: SessionState::Booting,
+                launch_command: launch_command(spec.program.as_str(), &spec.args),
+                last_heartbeat_at: Utc::now(),
+                last_summary: Some("Standby repair supervisor".to_owned()),
+            };
+            self.store.persist_session(&session, None)?;
+            let task_id = Uuid::new_v4();
+            self.store.persist_task(&TaskRecord {
+                id: task_id,
+                mission_id,
+                worker_id: session.id,
+                title: "Repair supervision".to_owned(),
+                description: "Stay synchronized, take over if the primary supervisor becomes unhealthy, and preserve mission continuity.".to_owned(),
+                status: "assigned".to_owned(),
+                priority: "high".to_owned(),
+                depends_on_json: "[]".to_owned(),
+                definition_of_done_json: serde_json::to_string(&vec![
+                    "Primary supervisor failure detected".to_owned(),
+                    "Repair takeover executed when needed".to_owned(),
+                    "Mission continuity preserved".to_owned(),
+                ])?,
+            })?;
+            repair_supervisor_id = Some(session.id);
+            repair_supervisor_prompt = Some(prompt);
+            repair_supervisor_spec = Some(spec);
+            repair_supervisor_session = Some(session);
+            repair_supervisor_task_id = Some(task_id);
+        }
         let mut active_supervisor_id = primary_supervisor_id;
         let mut stats = WatchdogStats::default();
         let mut mass_death_detector = health::MassDeathDetector::default();
@@ -1174,6 +1369,8 @@ impl Orchestrator {
         let mut supervisor_mode = SupervisorMode::Healthy;
         let mut last_state_card_sent = Instant::now();
         let state_card_interval = Duration::from_secs(supervisor::STATE_CARD_INTERVAL_SECS);
+        let status_snapshot_interval = Duration::from_secs(1);
+        let full_surface_interval = Duration::from_secs(5);
         let mut worker_continuity_announced = false;
         let tmux_live = !control_surface.tmux_session_names.is_empty();
         let (supervisor_spec, supervisor_prompt_embedded) = if tmux_live {
@@ -1187,17 +1384,21 @@ impl Orchestrator {
         };
         let supervisor_running =
             supervisor_runtime.spawn(supervisor_session.id, supervisor_spec.clone())?;
-        let (repair_supervisor_spec, repair_prompt_embedded) = if tmux_live {
-            (repair_supervisor_spec, false)
+        let repair_launch = if let (Some(session), Some(spec), Some(prompt)) = (
+            repair_supervisor_session.clone(),
+            repair_supervisor_spec.clone(),
+            repair_supervisor_prompt.clone(),
+        ) {
+            let (spec, prompt_embedded) = if tmux_live {
+                (spec, false)
+            } else {
+                embed_initial_prompt_if_supported(session.agent, spec, &prompt)
+            };
+            let running = supervisor_runtime.spawn(session.id, spec.clone())?;
+            Some((session, spec, prompt, prompt_embedded, running))
         } else {
-            embed_initial_prompt_if_supported(
-                repair_supervisor_session.agent,
-                repair_supervisor_spec,
-                &repair_supervisor_prompt,
-            )
+            None
         };
-        let repair_supervisor_running = supervisor_runtime
-            .spawn(repair_supervisor_session.id, repair_supervisor_spec.clone())?;
         // Wait for supervisor to boot before spawning workers
         if tmux_live {
             std::thread::sleep(std::time::Duration::from_millis(800));
@@ -1218,27 +1419,29 @@ impl Orchestrator {
                 "supervisor".to_owned(),
             ],
         );
-        register_session(
-            &mut active_sessions,
-            &mut alias_map,
-            repair_supervisor_session.clone(),
-            None,
-            repair_supervisor_running,
-            None,
-            repair_supervisor_spec.clone(),
-            repair_supervisor_prompt.clone(),
-            Some(repair_supervisor_task.id),
-            vec![
-                repair_supervisor_session.name.clone(),
-                "supervisor-02".to_owned(),
-                "repair-supervisor".to_owned(),
-                "standby-supervisor".to_owned(),
-            ],
-        );
         self.store
             .update_session_state(supervisor_session.id, SessionState::Progressing)?;
-        self.store
-            .update_session_state(repair_supervisor_session.id, SessionState::Progressing)?;
+        if let Some((session, spec, prompt, _, running)) = repair_launch {
+            register_session(
+                &mut active_sessions,
+                &mut alias_map,
+                session.clone(),
+                None,
+                running,
+                None,
+                spec,
+                prompt,
+                repair_supervisor_task_id,
+                vec![
+                    session.name.clone(),
+                    "supervisor-02".to_owned(),
+                    "repair-supervisor".to_owned(),
+                    "standby-supervisor".to_owned(),
+                ],
+            );
+            self.store
+                .update_session_state(session.id, SessionState::Progressing)?;
+        }
 
         let mut prompt_queue = Vec::<(Uuid, Duration, String)>::new();
         if !supervisor_prompt_embedded {
@@ -1251,14 +1454,13 @@ impl Orchestrator {
                 supervisor_prompt,
             ));
         }
-        if !repair_prompt_embedded {
+        if let (Some(session_id), Some(prompt)) = (repair_supervisor_id, repair_supervisor_prompt.clone())
+            && let Some(session) = active_sessions.get(&session_id)
+        {
             prompt_queue.push((
-                repair_supervisor_session.id,
-                active_sessions
-                    .get(&repair_supervisor_session.id)
-                    .map(|session| session.runtime.prompt_delay())
-                    .unwrap_or_default(),
-                repair_supervisor_prompt,
+                session_id,
+                session.runtime.prompt_delay(),
+                prompt,
             ));
         }
 
@@ -1310,6 +1512,15 @@ impl Orchestrator {
             );
             self.store
                 .update_session_state(launch.session.id, SessionState::Progressing)?;
+            if let Some(session) = active_sessions.get_mut(&launch.session.id) {
+                session.state = SessionState::Progressing;
+                session.record.last_summary =
+                    Some("Assignment delivered; awaiting first Sapphire status.".to_owned());
+            }
+            self.store.update_worker_summary(
+                launch.session.id,
+                "Assignment delivered; awaiting first Sapphire status.",
+            )?;
             if !prompt_embedded {
                 prompt_queue.push((launch.session.id, prompt_delay, launch.prompt));
             }
@@ -1323,8 +1534,29 @@ impl Orchestrator {
                 tokio::time::sleep(additional).await;
                 waited = delay;
             }
-            if let Some(session) = active_sessions.get(&session_id) {
-                session.runtime.send_prompt(&prompt)?;
+            if let Some(session) = active_sessions.get_mut(&session_id) {
+                if session.launch_prompt_sent {
+                    info!(
+                        session = %session_id,
+                        worker = %session.record.name,
+                        "launch prompt already sent, skipping"
+                    );
+                    continue;
+                }
+                info!(
+                    session = %session_id,
+                    worker = %session.record.name,
+                    delay_ms = delay.as_millis(),
+                    prompt_bytes = prompt.len(),
+                    "dispatching launch prompt"
+                );
+                send_prompt_immediately(session, &prompt)?;
+                session.launch_prompt_sent = true;
+                info!(
+                    session = %session_id,
+                    worker = %session.record.name,
+                    "launch prompt sent successfully"
+                );
             }
         }
 
@@ -1341,7 +1573,10 @@ impl Orchestrator {
             &active_sessions,
             &pending_mail,
             &stats,
+            true,
         )?;
+        let mut last_snapshot_written_at = Instant::now();
+        let mut last_full_surface_written_at = last_snapshot_written_at;
 
         loop {
             if let Some(limit) = max_runtime
@@ -1392,29 +1627,47 @@ impl Orchestrator {
                 control_surface,
             )?;
 
-            self.handle_supervisor_health(
+            self.handle_settled_worker_observations(
                 mission_id,
-                primary_supervisor_id,
-                repair_supervisor_id,
-                &mut active_supervisor_id,
-                stall_after,
+                &config.repo,
+                active_supervisor_id,
                 &mut active_sessions,
-                &pending_mail,
-                &pending_supervisor_decisions,
-                started_at,
-                &mut supervisor_mode,
-                &mut worker_continuity_announced,
+                &mut pending_supervisor_decisions,
+                supervisor_mode == SupervisorMode::Degraded,
                 &mut stats,
             )?;
 
+            refresh_tmux_health_cache(&mut active_sessions);
+
+            if mission_profile.enable_supervisor_health_recovery
+                && let Some(repair_supervisor_id) = repair_supervisor_id
+            {
+                self.handle_supervisor_health(
+                    mission_id,
+                    primary_supervisor_id,
+                    repair_supervisor_id,
+                    &mut active_supervisor_id,
+                    stall_after,
+                    &mut active_sessions,
+                    &pending_mail,
+                    &pending_supervisor_decisions,
+                    started_at,
+                    &mut supervisor_mode,
+                    &mut worker_continuity_announced,
+                    &mut stats,
+                )?;
+            }
+
             // Health probe: nudge sessions that haven't produced output in a while
             // before they hit the stall threshold (Gas Town two-tier response pattern).
-            self.health_probe_sessions(
-                mission_id,
-                stall_after,
-                &mut active_sessions,
-                &mut stats,
-            )?;
+            if mission_profile.enable_health_probes {
+                self.health_probe_sessions(
+                    mission_id,
+                    stall_after,
+                    &mut active_sessions,
+                    &mut stats,
+                )?;
+            }
 
             // Zombie debounce: check sessions that appear dead but haven't exceeded
             // the consecutive zombie threshold yet. Prevents false kills during
@@ -1435,13 +1688,15 @@ impl Orchestrator {
                 supervisor_mode == SupervisorMode::Degraded,
                 &mut stats,
             )?;
-            self.handle_protocol_reminders(
-                mission_id,
-                active_supervisor_id,
-                &mut active_sessions,
-                &mut pending_supervisor_decisions,
-                &mut stats,
-            )?;
+            if mission_profile.enable_protocol_reminders {
+                self.handle_protocol_reminders(
+                    mission_id,
+                    active_supervisor_id,
+                    &mut active_sessions,
+                    &mut pending_supervisor_decisions,
+                    &mut stats,
+                )?;
+            }
             self.handle_pending_mail(
                 mission_id,
                 active_supervisor_id,
@@ -1449,6 +1704,8 @@ impl Orchestrator {
                 &mut pending_mail,
             )?;
             self.handle_pending_supervisor_decisions(
+                mission_id,
+                active_supervisor_id,
                 &mut active_sessions,
                 &mut pending_supervisor_decisions,
             )?;
@@ -1472,19 +1729,28 @@ impl Orchestrator {
                 }
             }
 
-            self.write_status_snapshot(
-                mission_id,
-                active_supervisor_id,
-                control_surface,
-                &active_sessions,
-                &pending_mail,
-                &stats,
-            )?;
+            if last_snapshot_written_at.elapsed() >= status_snapshot_interval {
+                let full_surface = last_full_surface_written_at.elapsed() >= full_surface_interval;
+                self.write_status_snapshot(
+                    mission_id,
+                    active_supervisor_id,
+                    control_surface,
+                    &active_sessions,
+                    &pending_mail,
+                    &stats,
+                    full_surface,
+                )?;
+                last_snapshot_written_at = Instant::now();
+                if full_surface {
+                    last_full_surface_written_at = last_snapshot_written_at;
+                }
+            }
 
             // Supervisor state card refresh — every 30s, send a full state snapshot.
             // The supervisor doesn't need to remember its 350-line prompt.md — this keeps
             // the full mission picture fresh in its context window.
-            if last_state_card_sent.elapsed() >= state_card_interval
+            if mission_profile.enable_state_cards
+                && last_state_card_sent.elapsed() >= state_card_interval
                 && supervisor_mode != SupervisorMode::Degraded
                 && !final_synthesis_requested
             {
@@ -1507,39 +1773,38 @@ impl Orchestrator {
                     ) {
                         last_state_card_sent = Instant::now();
                     }
-                    let standby_supervisor_id = if active_supervisor_id == primary_supervisor_id {
-                        repair_supervisor_id
-                    } else {
-                        primary_supervisor_id
-                    };
-                    if let Some(standby_supervisor) =
-                        active_sessions.get_mut(&standby_supervisor_id)
-                        && !matches!(
-                            standby_supervisor.state,
-                            SessionState::Exited | SessionState::Failed
-                        )
-                    {
-                        let sync_prompt = supervisor::build_repair_sync_prompt(
-                            &card,
-                            &active_supervisor_name,
-                        );
-                        let key = supervisor::state_card_key(&sync_prompt);
-                        if standby_supervisor
-                            .last_supervisor_state_card_key
-                            .as_deref()
-                            != Some(key.as_str())
+                    if let Some(repair_supervisor_id) = repair_supervisor_id {
+                        let standby_supervisor_id = if active_supervisor_id == primary_supervisor_id {
+                            repair_supervisor_id
+                        } else {
+                            primary_supervisor_id
+                        };
+                        if let Some(standby_supervisor) =
+                            active_sessions.get_mut(&standby_supervisor_id)
+                            && !matches!(
+                                standby_supervisor.state,
+                                SessionState::Exited | SessionState::Failed
+                            )
                         {
-                            standby_supervisor.last_supervisor_state_card_key = Some(key);
-                            let _ = send_or_queue_prompt(standby_supervisor, &sync_prompt);
+                            let sync_prompt = supervisor::build_repair_sync_prompt(
+                                &card,
+                                &active_supervisor_name,
+                            );
+                            let key = supervisor::state_card_key(&sync_prompt);
+                            if standby_supervisor
+                                .last_supervisor_state_card_key
+                                .as_deref()
+                                != Some(key.as_str())
+                            {
+                                standby_supervisor.last_supervisor_state_card_key = Some(key);
+                                let _ = send_or_queue_prompt(standby_supervisor, &sync_prompt);
+                            }
                         }
                     }
                 }
             }
 
-            let workers_terminal = active_sessions
-                .values()
-                .filter(|session| session.record.role == SessionRole::Worker)
-                .all(|session| session.state.is_terminal());
+            let workers_terminal = finalization::workers_are_terminal(&active_sessions);
 
             if workers_terminal && !final_synthesis_requested {
                 if let Some(supervisor) = active_sessions.get_mut(&active_supervisor_id)
@@ -1551,19 +1816,12 @@ impl Orchestrator {
                 final_synthesis_requested = true;
             }
 
-            let everyone_exited = active_sessions
-                .values()
-                .all(|session| session.state == SessionState::Exited);
-            let supervisor_terminal = active_sessions
-                .get(&active_supervisor_id)
-                .map(|session| session.state.is_terminal())
-                .unwrap_or(true);
-
-            if workers_terminal
-                && (final_synthesis_requested
-                    && (supervisor_terminal || supervisor_mode == SupervisorMode::Degraded)
-                    || everyone_exited)
-            {
+            if finalization::should_break_run(
+                &active_sessions,
+                active_supervisor_id,
+                final_synthesis_requested,
+                supervisor_mode,
+            ) {
                 break;
             }
         }
@@ -1589,6 +1847,7 @@ impl Orchestrator {
             &active_sessions,
             &pending_mail,
             &stats,
+            true,
         )?;
         if !control_surface.tmux_session_names.is_empty() {
             self.store.append_summary(
@@ -1627,10 +1886,10 @@ impl Orchestrator {
         match event {
             RuntimeEvent::Output { session_id, chunk } => {
                 let mut directives = Vec::new();
-                let mut normalized_observation = None;
                 let mut supervisor_action = None;
                 let mut final_envelope = None;
                 let mut should_reset_restart_tracker = false;
+                let mut should_clear_transient_supervisor_decisions = false;
                 if let Some(session) = active_sessions.get_mut(session_id) {
                     let now = Instant::now();
                     session.last_output_at = now;
@@ -1649,14 +1908,15 @@ impl Orchestrator {
                     self.store.update_worker_heartbeat(*session_id)?;
                     // Record intervention response time (from gastown health/health.md pattern)
                     record_intervention_response(session, now);
+                    if session.record.role == SessionRole::Worker {
+                        clear_superseded_prompt_queue(session);
+                        should_clear_transient_supervisor_decisions = true;
+                    }
                     let sanitized = crate::protocol::sanitize_output(chunk);
                     directives = consume_directives(&mut session.line_buffer, &sanitized);
                     session.raw_buffer.push_str(&sanitized);
                     trim_recent_utf8(&mut session.raw_buffer, 64_000, 32_000);
                     let adapter = adapter_for(session.record.agent);
-                    if directives.is_empty() {
-                        normalized_observation = adapter.detect_state(&session.raw_buffer);
-                    }
                     if session.record.role == SessionRole::Supervisor
                         && *session_id == active_supervisor_id
                     {
@@ -1669,6 +1929,12 @@ impl Orchestrator {
                 }
                 if should_reset_restart_tracker {
                     let _ = self.store.reset_restart_tracker(*session_id);
+                }
+                if should_clear_transient_supervisor_decisions {
+                    clear_transient_supervisor_decisions_on_output(
+                        pending_supervisor_decisions,
+                        *session_id,
+                    );
                 }
 
                 for directive in directives {
@@ -1701,6 +1967,7 @@ impl Orchestrator {
                                 active_supervisor_id,
                                 *session_id,
                                 status,
+                                false,
                                 active_sessions,
                                 pending_supervisor_decisions,
                                 supervisor_degraded,
@@ -1723,7 +1990,7 @@ impl Orchestrator {
                                 }
                             }
                             self.handle_mail_directive(
-                                &repo_root.join(".sp"),
+                                &control_surface.state_dir,
                                 mission_id,
                                 active_supervisor_id,
                                 *session_id,
@@ -1752,20 +2019,6 @@ impl Orchestrator {
                             stats,
                         )?,
                     }
-                }
-
-                if let Some(observation) = normalized_observation {
-                    self.handle_normalized_observation(
-                        mission_id,
-                        repo_root,
-                        active_supervisor_id,
-                        *session_id,
-                        observation,
-                        active_sessions,
-                        pending_supervisor_decisions,
-                        supervisor_degraded,
-                        stats,
-                    )?;
                 }
 
                 if let Some(action) = supervisor_action {
@@ -2031,17 +2284,30 @@ impl Orchestrator {
         supervisor_id: Uuid,
         session_id: Uuid,
         directive: StatusDirective,
+        supervisor_override: bool,
         active_sessions: &mut HashMap<Uuid, ActiveSession>,
         pending_supervisor_decisions: &mut HashMap<String, PendingSupervisorDecision>,
         supervisor_degraded: bool,
         _stats: &mut WatchdogStats,
     ) -> Result<()> {
-        let Some(mut new_state) = directive.session_state() else {
+        let Some(reported_state) = directive.session_state() else {
             return Ok(());
         };
+        let Some(session_role) = active_sessions
+            .get(&session_id)
+            .map(|session| session.record.role)
+        else {
+            return Ok(());
+        };
+        let mut new_state = enforcement::canonicalize_worker_state(
+            session_role,
+            reported_state,
+            supervisor_override,
+        );
 
         let mut notify_supervisor = false;
         let mut validation_escalation = None::<String>;
+        let mut overlap_escalation = None::<String>;
         let mut state_summary = directive.summary.clone();
         let mut session_name = String::new();
         let mut validation_result: Option<(Option<Uuid>, String)> = None;
@@ -2049,7 +2315,18 @@ impl Orchestrator {
         let commands = directive.commands.clone();
         let mut risks = directive.risks.clone();
         let overlap = directive.overlap.clone();
+        let overlap_detail = enforcement::meaningful_overlap_detail(overlap.as_deref());
         let mut completion_gate_correction = None::<String>;
+
+        if !supervisor_override
+            && session_role == SessionRole::Worker
+            && reported_state == SessionState::Validated
+        {
+            state_summary = format!(
+                "worker reported validated; awaiting supervisor acceptance: {}",
+                directive.summary
+            );
+        }
 
         if matches!(
             new_state,
@@ -2077,7 +2354,11 @@ impl Orchestrator {
 
         if let Some(session) = active_sessions.get_mut(&session_id) {
             session_name = session.record.name.clone();
-            session.last_output_at = Instant::now();
+            let now = Instant::now();
+            session.last_output_at = now;
+            session.last_confirmed_alive = now;
+            enforcement::note_status_report(session, now);
+            session.reported_overlap = overlap_detail.clone();
             session.state = new_state;
             session.record.last_summary = Some(state_summary.clone());
             if new_state != SessionState::Stalled {
@@ -2119,7 +2400,8 @@ impl Orchestrator {
                 }
             }
 
-            notify_supervisor = session.record.role == SessionRole::Worker
+            notify_supervisor = !supervisor_override
+                && session.record.role == SessionRole::Worker
                 && matches!(
                     new_state,
                     SessionState::Blocked
@@ -2159,6 +2441,17 @@ impl Orchestrator {
                     state_summary
                 ));
             }
+            if !supervisor_override
+                && session.record.role == SessionRole::Worker
+                && let Some(detail) = overlap_detail.as_deref()
+                && !supervisor_degraded
+            {
+                overlap_escalation = Some(format!(
+                    "Worker {} reported live overlap risk: {}. Enforce ownership, keep newer teammate work intact, and decide whether to redirect_worker, message_worker, or fail_worker.",
+                    session.record.name,
+                    detail,
+                ));
+            }
         }
 
         self.store.append_json_event(
@@ -2168,7 +2461,7 @@ impl Orchestrator {
             &state_summary,
             &json!({
                 "state": new_state.as_str(),
-                "summary": directive.summary,
+                "summary": state_summary,
                 "files": files,
                 "commands": commands,
                 "risks": risks,
@@ -2209,6 +2502,23 @@ impl Orchestrator {
             self.send_supervisor_notice(mission_id, supervisor_id, active_sessions, SupervisorEventType::DoneClaimed, &reason)?;
         }
 
+        if let Some(reason) = overlap_escalation
+            && queue_supervisor_decision(
+                pending_supervisor_decisions,
+                SupervisorDecisionKind::OverlapRecovery,
+                session_id,
+                &reason,
+            )
+        {
+            self.send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                active_sessions,
+                SupervisorEventType::Contradiction,
+                &reason,
+            )?;
+        }
+
         clear_resolved_supervisor_decisions(
             pending_supervisor_decisions,
             active_sessions,
@@ -2237,17 +2547,96 @@ impl Orchestrator {
         }
 
         if let Some(correction) = completion_gate_correction
-            && let Some(session) = active_sessions.get_mut(&session_id)
+            && queue_supervisor_decision(
+                pending_supervisor_decisions,
+                SupervisorDecisionKind::Validation,
+                session_id,
+                &format!(
+                    "Worker {} needs a strict completion correction: {}",
+                    session_name,
+                    correction,
+                ),
+            )
         {
-            let adapter = adapter_for(session.record.agent);
-            let prompt = adapter.build_correction_prompt(&correction);
-            let _ = send_or_queue_prompt(session, &prompt);
+            self.send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                active_sessions,
+                SupervisorEventType::WeakOutput,
+                &format!(
+                    "Completion claim from {} failed the artifact gate. Challenge the worker directly with proof requirements. {}",
+                    session_name,
+                    correction,
+                ),
+            )?;
         }
 
         if session_id == supervisor_id && new_state == SessionState::Validated {
             let _ = self
                 .store
                 .update_mission_final_summary(mission_id, &state_summary);
+        }
+
+        // Update worker agent memory file for resume continuity
+        if session_role == SessionRole::Worker && !session_name.is_empty() {
+            let mem_store = self.store.agent_memory();
+            // Ensure initial memory file exists, then update state and files
+            if mem_store.load_memory(&mission_id, &session_name).unwrap_or(None).is_none() {
+                let packet = active_sessions.get(&session_id).and_then(|s| s.packet.as_ref());
+                let memory = crate::storage::agent_memory::AgentMemory {
+                    mission_id,
+                    display_name: session_name.clone(),
+                    role_type: packet.map(|p| p.role_type.clone()).unwrap_or_default(),
+                    owned_scope: packet
+                        .map(|p| p.owned_scope.clone())
+                        .filter(|s| !s.is_empty())
+                        .into_iter()
+                        .collect(),
+                    decisions: Vec::new(),
+                    blockers: directive.risks.clone(),
+                    learnings: Vec::new(),
+                    files_touched: directive.files.clone(),
+                    final_state: directive.state.clone(),
+                    summary: directive.summary.clone(),
+                    created_at: Utc::now(),
+                };
+                let _ = mem_store.save_memory(&mission_id, &session_name, &memory);
+            } else {
+                let _ = mem_store.update_state(&mission_id, &session_name, &directive.state);
+                if !directive.files.is_empty() {
+                    let _ = mem_store.append_files_touched(&mission_id, &session_name, &directive.files);
+                }
+                // Update summary by loading, modifying, and saving
+                if let Ok(Some(mut mem)) = mem_store.load_memory(&mission_id, &session_name) {
+                    mem.summary = directive.summary.clone();
+                    for risk in &directive.risks {
+                        if !mem.blockers.contains(risk) {
+                            mem.blockers.push(risk.clone());
+                        }
+                    }
+                    let _ = mem_store.save_memory(&mission_id, &session_name, &mem);
+                }
+            }
+
+            // Terminal state snapshot — save complete memory record when worker
+            // reaches a terminal state. This is what powers cross-mission memory:
+            // Engineer-1 on the next mission will see what Engineer-1 did here.
+            if session_role == SessionRole::Worker
+                && !session_name.is_empty()
+                && new_state.is_terminal()
+            {
+                let _ = save_terminal_memory_snapshot(
+                    &self.store,
+                    mission_id,
+                    session_id,
+                    &session_name,
+                    active_sessions,
+                    &new_state,
+                    &state_summary,
+                    &files,
+                    &risks,
+                );
+            }
         }
 
         Ok(())
@@ -2353,6 +2742,7 @@ impl Orchestrator {
                 risks: observation.blocker.clone().into_iter().collect::<Vec<_>>(),
                 overlap: None,
             },
+            false,
             active_sessions,
             pending_supervisor_decisions,
             supervisor_degraded,
@@ -2380,6 +2770,58 @@ impl Orchestrator {
                 self.send_supervisor_notice(mission_id, supervisor_id, active_sessions, SupervisorEventType::WeakOutput, &reason)?;
             }
         }
+        Ok(())
+    }
+
+    fn handle_settled_worker_observations(
+        &self,
+        mission_id: Uuid,
+        repo_root: &Path,
+        supervisor_id: Uuid,
+        active_sessions: &mut HashMap<Uuid, ActiveSession>,
+        pending_supervisor_decisions: &mut HashMap<String, PendingSupervisorDecision>,
+        supervisor_degraded: bool,
+        stats: &mut WatchdogStats,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let mut observations = Vec::new();
+
+        for (session_id, session) in active_sessions.iter() {
+            if session.record.role != SessionRole::Worker
+                || session.state.is_terminal()
+                || session.raw_buffer.is_empty()
+                || session.output_chunks == 0
+                || now < session.startup_grace_until
+                || !worker_output_has_settled(session, now)
+                || has_recent_status_activity(session, now)
+                || session_has_live_terminal(session)
+                || !session.queued_prompts.is_empty()
+                || recently_prompted(session, now)
+                || is_in_cooldown(session, now)
+            {
+                continue;
+            }
+
+            let adapter = adapter_for(session.record.agent);
+            if let Some(observation) = adapter.detect_state(&session.raw_buffer) {
+                observations.push((*session_id, observation));
+            }
+        }
+
+        for (session_id, observation) in observations {
+            self.handle_normalized_observation(
+                mission_id,
+                repo_root,
+                supervisor_id,
+                session_id,
+                observation,
+                active_sessions,
+                pending_supervisor_decisions,
+                supervisor_degraded,
+                stats,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -2415,24 +2857,40 @@ impl Orchestrator {
         let Some(target_id) = resolve_alias(alias_map, target_alias) else {
             return Ok(());
         };
-        clear_supervisor_decisions_for_target(pending_supervisor_decisions, target_id);
+        let action_name = action.action.trim().to_ascii_lowercase();
+        pending_supervisor_decisions.retain(|_, pending| {
+            pending.target_session_id != target_id
+                || !enforcement::action_resolves_decision(pending.kind, &action_name)
+        });
 
-        match action.action.trim().to_ascii_lowercase().as_str() {
+        match action_name.as_str() {
             "observe" => {}
             "validate_worker" => {
                 if let Some(target) = active_sessions.get_mut(&target_id) {
                     let adapter = adapter_for(target.record.agent);
-                    let prompt = adapter.build_validation_prompt();
-                    let _ = send_or_queue_prompt(target, &prompt);
+                    if let Some(msg) = action.message.as_deref() {
+                        let prompt = adapter.build_validation_prompt(msg);
+                        let _ = send_or_queue_prompt(target, &prompt);
+                        stats.validation_challenges += 1;
+                    } else {
+                        // No message from supervisor — skip. The real AI brain
+                        // must provide a concrete instruction; no deterministic fallback.
+                        self.store.append_json_event(
+                            mission_id,
+                            Some(supervisor_id),
+                            "supervisor_action_skipped",
+                            "validate_worker without message — skipping (no deterministic fallback)",
+                            &json!({ "action": action.action, "target": action.target }),
+                        )?;
+                    }
                 }
-                stats.validation_challenges += 1;
             }
             "retry_worker" | "redirect_worker" | "message_worker" => {
                 if let Some(target) = active_sessions.get_mut(&target_id) {
                     let adapter = adapter_for(target.record.agent);
-                    let prompt = adapter.build_correction_prompt(
-                        action.message.as_deref().unwrap_or(&action.summary),
-                    );
+                    let message = action.message.as_deref()
+                        .unwrap_or(&action.summary);
+                    let prompt = adapter.build_correction_prompt(message);
                     let _ = send_or_queue_prompt(target, &prompt);
                 }
             }
@@ -2450,6 +2908,7 @@ impl Orchestrator {
                         risks: Vec::new(),
                         overlap: None,
                     },
+                    true,
                     active_sessions,
                     pending_supervisor_decisions,
                     false,
@@ -2470,6 +2929,7 @@ impl Orchestrator {
                         risks: Vec::new(),
                         overlap: None,
                     },
+                    true,
                     active_sessions,
                     pending_supervisor_decisions,
                     false,
@@ -2502,8 +2962,13 @@ impl Orchestrator {
         active_sessions: &mut HashMap<Uuid, ActiveSession>,
     ) -> Result<()> {
         let key = format!(
-            "{}|{}",
+            "{}|{}|{}",
             final_envelope.state.as_str(),
+            if final_envelope.ready_for_cleanup {
+                "cleanup_yes"
+            } else {
+                "cleanup_no"
+            },
             final_envelope.summary
         );
         if let Some(supervisor) = active_sessions.get_mut(&supervisor_id) {
@@ -2511,18 +2976,34 @@ impl Orchestrator {
                 return Ok(());
             }
             supervisor.last_observation_key = Some(key);
-            supervisor.state = final_envelope.state;
-            self.store
-                .update_session_state(supervisor_id, final_envelope.state)?;
+            supervisor.cleanup_authorized = final_envelope.ready_for_cleanup;
+            supervisor.record.last_summary = Some(final_envelope.summary.clone());
+            if final_envelope.ready_for_cleanup {
+                supervisor.state = final_envelope.state;
+                self.store
+                    .update_session_state(supervisor_id, final_envelope.state)?;
+            }
         }
-        self.store
-            .update_mission_final_summary(mission_id, &final_envelope.summary)?;
         self.store.append_summary(
             mission_id,
             Some(supervisor_id),
             "final_summary",
             &final_envelope.summary,
         )?;
+        self.store.append_json_event(
+            mission_id,
+            Some(supervisor_id),
+            "cleanup_decision",
+            &final_envelope.summary,
+            &json!({
+                "final_state": final_envelope.state.as_str(),
+                "ready_for_cleanup": final_envelope.ready_for_cleanup,
+            }),
+        )?;
+        if final_envelope.ready_for_cleanup {
+            self.store
+                .update_mission_final_summary(mission_id, &final_envelope.summary)?;
+        }
         Ok(())
     }
 
@@ -2742,7 +3223,7 @@ impl Orchestrator {
             return Ok(());
         }
 
-        let Some((supervisor_state, elapsed, tmux_health, supervisor_agent, supervisor_name)) =
+        let Some((supervisor_state, elapsed, tmux_health, _supervisor_agent, supervisor_name)) =
             describe_supervisor(*active_supervisor_id)
         else {
             return Ok(());
@@ -2754,19 +3235,16 @@ impl Orchestrator {
 
         if current_condition == supervisor::SupervisorCondition::ProbeNeeded {
             if *supervisor_mode == SupervisorMode::Healthy {
-                if let Some(supervisor) = active_sessions.get_mut(active_supervisor_id) {
-                    let adapter = adapter_for(supervisor_agent);
-                    let prompt = adapter.build_status_prompt(
-                        "Supervisor health check: reply with your next supervisory action or blocker now.",
-                    );
-                    let _ = send_or_queue_prompt(supervisor, &prompt);
-                }
                 *supervisor_mode = SupervisorMode::Recovering;
                 self.store.append_json_event(
                     mission_id,
                     Some(*active_supervisor_id),
                     "supervisor_health",
-                    "supervisor recovery probe sent",
+                    if communication_policy::SUPERVISOR_HEALTH_PROBES {
+                        "supervisor recovery probe sent"
+                    } else {
+                        "supervisor entered recovering mode without a watchdog probe"
+                    },
                     &json!({
                         "supervisor": supervisor_name,
                         "state": supervisor_state.as_str(),
@@ -2799,13 +3277,17 @@ impl Orchestrator {
         acting_supervisor_name: &str,
         worker_continuity_announced: &mut bool,
     ) {
+        // No deterministic continuity prompt to workers.
+        // The repair supervisor's real AI brain decides what to tell each worker.
         if *worker_continuity_announced {
             return;
         }
-        let prompt = supervisor::build_worker_continuity_prompt(acting_supervisor_name);
+        // Update summary so watchdog reflects the change.
         for session in active_sessions.values_mut() {
             if session.record.role == SessionRole::Worker && !session.state.is_terminal() {
-                let _ = send_or_queue_prompt(session, &prompt);
+                session.record.last_summary = Some(
+                    format!("Supervisor transitioned to {acting_supervisor_name}")
+                );
             }
         }
         *worker_continuity_announced = true;
@@ -2813,12 +3295,16 @@ impl Orchestrator {
 
     fn handle_pending_supervisor_decisions(
         &self,
+        mission_id: Uuid,
+        supervisor_id: Uuid,
         active_sessions: &mut HashMap<Uuid, ActiveSession>,
         pending_supervisor_decisions: &mut HashMap<String, PendingSupervisorDecision>,
     ) -> Result<()> {
+        let now = Instant::now();
         let mut completed = Vec::new();
+        let mut follow_ups = Vec::new();
 
-        for (key, pending) in pending_supervisor_decisions.iter() {
+        for (key, pending) in pending_supervisor_decisions.iter_mut() {
             let Some(target) = active_sessions.get(&pending.target_session_id) else {
                 completed.push(key.clone());
                 continue;
@@ -2830,14 +3316,38 @@ impl Orchestrator {
                 || (pending.kind == SupervisorDecisionKind::StallRecovery
                     && target.state != SessionState::Stalled)
                 || (pending.kind == SupervisorDecisionKind::LowConfidenceRecovery
-                    && target.low_confidence_count == 0);
+                    && target.low_confidence_count == 0)
+                || (pending.kind == SupervisorDecisionKind::OverlapRecovery
+                    && target
+                        .reported_overlap
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty()));
             if resolved {
                 completed.push(key.clone());
+                continue;
+            }
+
+            if enforcement::should_follow_up_pending_decision(pending, now) {
+                follow_ups.push((
+                    enforcement::follow_up_event_type(pending.kind),
+                    enforcement::follow_up_reason(pending, target, now),
+                ));
+                enforcement::mark_pending_decision_notified(pending, now);
             }
         }
 
         for key in completed {
             pending_supervisor_decisions.remove(&key);
+        }
+
+        for (event_type, body) in follow_ups {
+            self.send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                active_sessions,
+                event_type,
+                &body,
+            )?;
         }
 
         Ok(())
@@ -2892,6 +3402,9 @@ impl Orchestrator {
             session.startup_grace_until = Instant::now() + startup_grace(session.record.agent);
             session.output_chunks = 0;
             session.directive_count = 0;
+            session.initial_status_received = false;
+            session.output_chunks_at_last_status = 0;
+            session.reported_overlap = None;
             session.protocol_reminder_sent = false;
             session.low_confidence_count = 0;
             session.last_observation_key = None;
@@ -2899,6 +3412,13 @@ impl Orchestrator {
             session.queued_prompt_keys.clear();
             session.recent_prompt_keys.clear();
             session.last_prompt_sent_at = None;
+            session.launch_prompt_sent = false;
+            session.cleanup_authorized = false;
+            session.last_tmux_health = None;
+            session.last_tmux_health_checked_at = None;
+            session.last_supervisor_notice_key = None;
+            session.recent_supervisor_notice_keys.clear();
+            session.last_supervisor_state_card_key = None;
             session.record.last_summary = Some(format!(
                 "Restarted after exit; attempt {}",
                 session.restart_count
@@ -2925,7 +3445,11 @@ impl Orchestrator {
             )?;
             if !prompt_embedded {
                 tokio::time::sleep(prompt_delay).await;
-                session.runtime.send_prompt(&session.launch_prompt)?;
+                if !session.launch_prompt_sent {
+                    let launch_prompt = session.launch_prompt.clone();
+                    send_prompt_immediately(session, &launch_prompt)?;
+                    session.launch_prompt_sent = true;
+                }
             }
             session.state = SessionState::Progressing;
             self.store
@@ -3022,7 +3546,7 @@ impl Orchestrator {
             if session.record.role == SessionRole::Supervisor || session.state.is_terminal() {
                 continue;
             }
-            if has_recent_status_activity(session, now) {
+            if has_recent_status_activity(session, now) || session_has_live_terminal(session) {
                 continue;
             }
             let idle_duration = now.duration_since(session.last_confirmed_alive);
@@ -3072,22 +3596,28 @@ impl Orchestrator {
         active_sessions: &mut HashMap<Uuid, ActiveSession>,
         stats: &mut WatchdogStats,
     ) -> Result<()> {
+        let now = Instant::now();
         let mut zombie_session_ids = Vec::new();
 
         for (session_id, session) in active_sessions.iter() {
             if session.record.role == SessionRole::Supervisor || session.state.is_terminal() {
                 continue;
             }
-            // Check if the runtime reports the session as exited/dead
-            // This is a lightweight check — the actual Exited event handler
-            // will handle confirmed deaths.
-            // Here we just track sessions that haven't produced output AND
-            // whose runtime handle indicates the process may be gone.
-            let idle_duration = Instant::now().duration_since(session.last_confirmed_alive);
-            if idle_duration > Duration::from_secs(60) {
-                // Session has been idle for over a minute — could be zombie.
-                // The debounce counter will track consecutive detections.
-                zombie_session_ids.push(*session_id);
+            if has_recent_status_activity(session, now) || !session.queued_prompts.is_empty() {
+                continue;
+            }
+
+            let idle_duration = now.duration_since(session.last_confirmed_alive);
+            if idle_duration <= Duration::from_secs(60) {
+                continue;
+            }
+
+            match session_tmux_health(session) {
+                Some(tmux::SessionHealth::Zombie | tmux::SessionHealth::Dead) => {
+                    zombie_session_ids.push(*session_id);
+                }
+                Some(tmux::SessionHealth::Healthy | tmux::SessionHealth::Hung | tmux::SessionHealth::Starting)
+                | None => {}
             }
         }
 
@@ -3133,6 +3663,7 @@ impl Orchestrator {
                 continue;
             }
             if has_recent_status_activity(session, now)
+                || session_has_live_terminal(session)
                 || !session.queued_prompts.is_empty()
                 || recently_prompted(session, now)
             {
@@ -3221,6 +3752,7 @@ impl Orchestrator {
                         risks: Vec::new(),
                         overlap: None,
                     },
+                    false,
                     active_sessions,
                     pending_supervisor_decisions,
                     supervisor_degraded,
@@ -3296,6 +3828,67 @@ impl Orchestrator {
         pending_supervisor_decisions: &mut HashMap<String, PendingSupervisorDecision>,
         stats: &mut WatchdogStats,
     ) -> Result<()> {
+        if !communication_policy::WATCHDOG_PROTOCOL_REMINDERS {
+            let mut low_observability = Vec::new();
+            let now = Instant::now();
+            for (session_id, session) in active_sessions.iter() {
+                if session.record.role != SessionRole::Worker
+                    || session.state.is_terminal()
+                    || session.protocol_reminder_sent
+                    || now < session.startup_grace_until
+                    || !session.queued_prompts.is_empty()
+                    || recently_prompted(session, now)
+                    || is_in_cooldown(session, now)
+                {
+                    continue;
+                }
+                let Some(report_kind) = enforcement::pending_report_back(session, now) else {
+                    continue;
+                };
+                low_observability.push((*session_id, report_kind));
+            }
+
+            for (session_id, report_kind) in low_observability {
+                let Some(session) = active_sessions.get_mut(&session_id) else {
+                    continue;
+                };
+                session.protocol_reminder_sent = true;
+                let summary = enforcement::status_summary(report_kind, &session.record.name);
+                session.record.last_summary = Some(summary.clone());
+                record_intervention(session, "status_enforcement_escalated", now);
+                self.store.append_json_event(
+                    mission_id,
+                    Some(session_id),
+                    "status_enforcement_escalated",
+                    "worker output lacked report-back; escalated to supervisor without watchdog prompt",
+                    &json!({
+                        "name": session.record.name,
+                        "output_chunks": session.output_chunks,
+                    }),
+                )?;
+                self.store.update_worker_summary(session_id, &summary)?;
+                stats.protocol_reminders += 1;
+
+                let reason = enforcement::status_reason(report_kind, &session.record.name);
+                if queue_supervisor_decision(
+                    pending_supervisor_decisions,
+                    SupervisorDecisionKind::LowConfidenceRecovery,
+                    session_id,
+                    &reason,
+                ) {
+                    self.send_supervisor_notice(
+                        mission_id,
+                        supervisor_id,
+                        active_sessions,
+                        SupervisorEventType::WeakOutput,
+                        &reason,
+                    )?;
+                }
+            }
+
+            return Ok(());
+        }
+
         let mut reminder_ids = Vec::new();
 
         for (session_id, session) in active_sessions.iter() {
@@ -3312,6 +3905,7 @@ impl Orchestrator {
                     now.duration_since(at)
                         < Duration::from_secs(supervisor::STATUS_FILE_LIVENESS_GRACE_SECS)
                 })
+                || session_has_live_terminal(session)
                 || is_in_cooldown(session, now)
                 || !session.queued_prompts.is_empty()
                 || recently_prompted(session, now)
@@ -3395,6 +3989,15 @@ impl Orchestrator {
             if !mail::mail_timeout_stage_due(pending, now) {
                 continue;
             }
+            let recipient_is_live = active_sessions
+                .get(&pending.recipient_session_id)
+                .is_some_and(|session| live_state::should_pause_mail_timeout(session, now));
+            let sender_is_live = active_sessions
+                .get(&pending.sender_session_id)
+                .is_some_and(|session| live_state::should_pause_mail_timeout(session, now));
+            if recipient_is_live || sender_is_live {
+                continue;
+            }
             pending.timeout_stage = pending.timeout_stage.saturating_add(1);
             pending.last_timeout_at = Some(now);
             pending.thread_state =
@@ -3418,20 +4021,22 @@ impl Orchestrator {
                 .map(|session| session.record.name.clone())
                 .unwrap_or_else(|| "unknown".to_owned());
 
-            if let Some(recipient) = active_sessions.get_mut(&recipient_session_id) {
-                let adapter = adapter_for(recipient.record.agent);
-                let prompt = mail::recipient_timeout_prompt(pending, &sender_name, stage);
-                let _ = send_or_queue_prompt(recipient, &adapter.build_status_prompt(&prompt));
-            }
+            if communication_policy::MAIL_TIMEOUT_DIRECT_PROMPTS {
+                if let Some(recipient) = active_sessions.get_mut(&recipient_session_id) {
+                    let adapter = adapter_for(recipient.record.agent);
+                    let prompt = mail::recipient_timeout_prompt(pending, &sender_name, stage);
+                    let _ = send_or_queue_prompt(recipient, &adapter.build_status_prompt(&prompt));
+                }
 
-            if let Some(sender) = active_sessions.get_mut(&sender_session_id) {
-                let prompt = mail::sender_timeout_prompt(pending, &recipient_name, stage);
-                let _ = send_or_queue_prompt(sender, &prompt);
-            }
+                if let Some(sender) = active_sessions.get_mut(&sender_session_id) {
+                    let prompt = mail::sender_timeout_prompt(pending, &recipient_name, stage);
+                    let _ = send_or_queue_prompt(sender, &prompt);
+                }
 
-            for cc_id in &cc_session_ids {
-                if let Some(cc_session) = active_sessions.get_mut(cc_id) {
-                    let _ = send_or_queue_prompt(cc_session, &mail::cc_timeout_prompt(pending, stage));
+                for cc_id in &cc_session_ids {
+                    if let Some(cc_session) = active_sessions.get_mut(cc_id) {
+                        let _ = send_or_queue_prompt(cc_session, &mail::cc_timeout_prompt(pending, stage));
+                    }
                 }
             }
 
@@ -3508,13 +4113,17 @@ impl Orchestrator {
             if matches!(supervisor.state, SessionState::Exited | SessionState::Failed) {
                 return Ok(());
             }
+            let now = Instant::now();
+            prune_recent_supervisor_notice_keys(supervisor, now);
             let notice_key = supervisor::notice_key(event_type, body);
-            if supervisor.last_supervisor_notice_key.as_deref() == Some(notice_key.as_str()) {
+            if supervisor.last_supervisor_notice_key.as_deref() == Some(notice_key.as_str())
+                || has_recent_supervisor_notice_key(supervisor, &notice_key)
+            {
                 return Ok(());
             }
-            supervisor.last_supervisor_notice_key = Some(notice_key);
             let adapter = adapter_for(supervisor.record.agent);
             let prompt = adapter.build_supervisor_action_prompt(event_type, body);
+            remember_supervisor_notice(supervisor, notice_key, now);
             let _ = send_or_queue_prompt(supervisor, &prompt);
         }
         self.store.append_json_event(
@@ -3541,12 +4150,21 @@ impl Orchestrator {
         active_sessions: &HashMap<Uuid, ActiveSession>,
         pending_mail: &HashMap<Uuid, PendingMail>,
         stats: &WatchdogStats,
+        full_surface: bool,
     ) -> Result<()> {
         let pod_summaries = coordination::summarize_pods(active_sessions, pending_mail);
-        let memory_summaries =
-            memory::write_agent_memories(control_surface, active_sessions, pending_mail)?;
-        let meetings =
-            meetings::write_meeting_artifacts(control_surface, active_sessions, pending_mail)?;
+        let memory_summaries = if full_surface {
+            memory::write_agent_memories(control_surface, active_sessions, pending_mail)?
+        } else {
+            Vec::new()
+        };
+        let meetings = if full_surface {
+            meetings::write_meeting_artifacts(control_surface, active_sessions, pending_mail)?
+        } else {
+            Vec::new()
+        };
+        let now = Instant::now();
+        let live_snapshot = live_state::Snapshot::build(active_sessions, now);
         let mut workers = active_sessions
             .values()
             .filter(|session| session.record.role == SessionRole::Worker)
@@ -3555,7 +4173,7 @@ impl Orchestrator {
 
         let blocked = workers
             .iter()
-            .filter(|session| session.state == SessionState::Blocked)
+            .filter(|session| live_snapshot.counts_as_blocked(session))
             .map(|session| session.record.name.clone())
             .collect::<Vec<_>>();
         let validation_queue = workers
@@ -3588,18 +4206,14 @@ impl Orchestrator {
             .collect::<Vec<_>>();
         let problems = workers
             .iter()
-            .filter(|session| {
-                matches!(
-                    session.state,
-                    SessionState::Failed
-                        | SessionState::Contradictory
-                        | SessionState::Stalled
-                        | SessionState::Blocked
-                        | SessionState::WrongDirection
-                        | SessionState::NeedsRetry
-                ) || session.validation_pending
+            .filter(|session| live_snapshot.counts_as_problem(session))
+            .map(|session| {
+                format!(
+                    "{} [{}]",
+                    session.record.name,
+                    live_snapshot.effective_state_label(session)
+                )
             })
-            .map(|session| format!("{} [{}]", session.record.name, session.state.as_str()))
             .collect::<Vec<_>>();
         let crash_loops = self
             .store
@@ -3626,7 +4240,7 @@ impl Orchestrator {
                 format!(
                     "{} [{}] {}",
                     session.record.name,
-                    session.state.as_str(),
+                    live_snapshot.effective_state_label(session),
                     session
                         .record
                         .last_summary
@@ -3645,7 +4259,7 @@ impl Orchestrator {
                 format!(
                     "{} [{}] {}",
                     session.record.name,
-                    session.state.as_str(),
+                    live_snapshot.effective_state_label(session),
                     session
                         .record
                         .last_summary
@@ -3760,7 +4374,7 @@ impl Orchestrator {
             lines.push(format!(
                 "- {} [{}] {}",
                 worker.record.name,
-                worker.state.as_str(),
+                live_snapshot.effective_state_label(worker),
                 worker
                     .record
                     .last_summary
@@ -3770,20 +4384,11 @@ impl Orchestrator {
         }
         write_string_to_file(&control_surface.status_file, &lines.join("\n"))?;
         write_string_to_file(&hidden_status_file(control_surface), &lines.join("\n"))?;
+        if !full_surface {
+            return Ok(());
+        }
         let mission = self.store.load_mission_snapshot(mission_id)?;
         let supervisor_summary = self.store.latest_supervisor_summary(mission_id)?;
-        let event_lines = self
-            .store
-            .recent_replay_entries(mission_id, 10)?
-            .into_iter()
-            .map(|entry| {
-                format!(
-                    "- {} {}",
-                    entry.created_at.format("%H:%M:%S"),
-                    truncate(&entry.body, 84)
-                )
-            })
-            .collect::<Vec<_>>();
         let mut dashboard = Vec::new();
         dashboard.push("# Sapphire".to_owned());
         if let Some(mission) = mission {
@@ -3861,10 +4466,11 @@ impl Orchestrator {
         dashboard.push(String::new());
         dashboard.push("## Sessions".to_owned());
         for session in active_sessions.values() {
+            let state_label = live_snapshot.effective_state_label(session);
             dashboard.push(format!(
                 "- {} [{}] {}",
                 session.record.name,
-                session.state.as_str(),
+                state_label,
                 truncate(
                     session
                         .record
@@ -3874,13 +4480,6 @@ impl Orchestrator {
                     96
                 ),
             ));
-        }
-        dashboard.push(String::new());
-        dashboard.push("## Recent".to_owned());
-        if event_lines.is_empty() {
-            dashboard.push("- waiting for runtime activity".to_owned());
-        } else {
-            dashboard.extend(event_lines);
         }
         dashboard.push(String::new());
         dashboard.push("Detach: Ctrl-b d".to_owned());
@@ -3896,23 +4495,9 @@ impl Orchestrator {
         config: &LaunchConfig,
     ) -> Result<Vec<String>> {
         let tmux = tmux::Tmux::new(None);
-        
-        // Check if sessions already exist
         let base_name = session_name.to_string();
         let per_tab = 10; // From launch-codex-tabs.sh: 10 terminals per tab
         let total_workers = config.worker_count.max(1);
-        
-        // Check if first session exists
-        let first_session = if total_workers <= per_tab {
-            format!("{base_name}-0")
-        } else {
-            format!("{base_name}-0")
-        };
-        
-        if tmux.has_session(&first_session) {
-            // Return existing session names (we don't track these, so just return what we can)
-            return Ok(vec![first_session]);
-        }
 
         // Create batch sessions: 10 workers per tmux session (from launch-codex-tabs.sh)
         let session_names = tmux.create_batch_sessions(
@@ -3988,29 +4573,51 @@ impl Orchestrator {
             }
             let now = Instant::now();
             session.last_status_file_modified = Some(update.modified_at);
-            session.last_status_update_at = Some(now);
+            if !update.bootstrap {
+                session.last_status_update_at = Some(now);
+            }
             session.last_confirmed_alive = now;
-            session.protocol_reminder_sent = false;
-            record_intervention_response(session, now);
-            updates.push((*session_id, update.directive));
+            if !update.bootstrap {
+                session.protocol_reminder_sent = false;
+                record_intervention_response(session, now);
+            }
+            updates.push((*session_id, update.directive, update.bootstrap));
         }
 
-        for (session_id, directive) in updates {
+        for (session_id, directive, bootstrap) in updates {
+            let source = if bootstrap {
+                "bootstrap_status_file"
+            } else {
+                "status_file"
+            };
             self.persist_normalized_status(
                 mission_id,
                 session_id,
                 &directive.state,
-                "status_file",
+                source,
                 Confidence::High,
                 &directive.summary,
                 &directive.summary,
             )?;
+            if bootstrap {
+                if let Some(session) = active_sessions.get_mut(&session_id) {
+                    if let Some(reported_state) = directive.session_state() {
+                        session.state = reported_state;
+                        session.record.last_summary = Some(directive.summary.clone());
+                        self.store.update_session_state(session_id, reported_state)?;
+                    }
+                    self.store
+                        .update_worker_summary(session_id, &directive.summary)?;
+                }
+                continue;
+            }
             self.handle_status_directive(
                 mission_id,
                 repo_root,
                 supervisor_id,
                 session_id,
                 directive,
+                false,
                 active_sessions,
                 pending_supervisor_decisions,
                 supervisor_degraded,
@@ -4102,6 +4709,9 @@ fn register_session(
             last_output_at: Instant::now(),
             output_chunks: 0,
             directive_count: 0,
+            initial_status_received: false,
+            output_chunks_at_last_status: 0,
+            reported_overlap: None,
             stall_count: 0,
             restart_count: 0,
             restart_at: None,
@@ -4127,9 +4737,14 @@ fn register_session(
             queued_prompt_keys: HashSet::new(),
             recent_prompt_keys: VecDeque::new(),
             last_prompt_sent_at: None,
+            launch_prompt_sent: false,
+            cleanup_authorized: false,
             last_status_update_at: None,
             last_status_file_modified: None,
+            last_tmux_health: None,
+            last_tmux_health_checked_at: None,
             last_supervisor_notice_key: None,
+            recent_supervisor_notice_keys: VecDeque::new(),
             last_supervisor_state_card_key: None,
             zombie_debounce: health::ZombieDebounce::default(),
             health_state: health::SessionHealthState::new(),
@@ -4208,15 +4823,20 @@ fn queue_supervisor_decision(
     reason: &str,
 ) -> bool {
     let key = supervisor_decision_key(kind, target_session_id);
-    if pending_supervisor_decisions.contains_key(&key) {
+    if let Some(existing) = pending_supervisor_decisions.get_mut(&key) {
+        existing.reason = reason.to_owned();
         return false;
     }
+    let now = Instant::now();
     pending_supervisor_decisions.insert(
         key,
         PendingSupervisorDecision {
             kind,
             target_session_id,
             reason: reason.to_owned(),
+            queued_at: now,
+            last_notified_at: now,
+            notice_count: 0,
         },
     );
     true
@@ -4248,7 +4868,24 @@ fn clear_resolved_supervisor_decisions(
             SupervisorDecisionKind::Validation => target.validation_pending,
             SupervisorDecisionKind::StallRecovery => target.state == SessionState::Stalled,
             SupervisorDecisionKind::LowConfidenceRecovery => target.low_confidence_count > 0,
+            SupervisorDecisionKind::OverlapRecovery => target
+                .reported_overlap
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
         }
+    });
+}
+
+fn clear_transient_supervisor_decisions_on_output(
+    pending_supervisor_decisions: &mut HashMap<String, PendingSupervisorDecision>,
+    target_session_id: Uuid,
+) {
+    pending_supervisor_decisions.retain(|_, pending| {
+        pending.target_session_id != target_session_id
+            || matches!(
+                pending.kind,
+                SupervisorDecisionKind::Validation | SupervisorDecisionKind::OverlapRecovery
+            )
     });
 }
 
@@ -4260,33 +4897,43 @@ fn supervisor_decision_key(kind: SupervisorDecisionKind, target_session_id: Uuid
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use chrono::Utc;
 
     use super::{
-        ActiveSession, Orchestrator, SupervisorDecisionKind, SupervisorMode, WatchdogStats,
+        enforcement,
+        ActiveSession, HEURISTIC_SETTLE_THRESHOLD, Orchestrator, QueuedPrompt,
+        SupervisorDecisionKind, SupervisorMode, WatchdogStats,
         drain_prompt_queues,
-        deterministic_plan_for_mission, ensure_agents_bootstrap, normalize_supervisor_plan,
+        deterministic_plan_for_mission, ensure_agents_bootstrap, ensure_state_tree, hidden_state_dir, normalize_supervisor_plan,
+        mission_profile,
         queue_supervisor_decision, rebuild_launch_spec, register_session,
         render_supervisor_prompt_with_agents, should_auto_restart,
         send_or_queue_prompt,
         startup_grace,
     };
+    use crate::adapter::SupervisorEventType;
+    use crate::cli::LaunchConfig;
     use crate::agent::AgentKind;
     use crate::model::{
         MissionPlan, RiskItem, SessionRecord, SessionRole, SessionState, WorkerPacket,
         Workstream, WorkstreamExecution,
     };
-    use crate::runtime::RunningSession;
+    use crate::runtime::{RunningSession, RuntimeEvent};
     use crate::store::Store;
     use crate::templates::PromptLibrary;
     use uuid::Uuid;
 
     fn test_orchestrator() -> Orchestrator {
-        let db_path = std::env::temp_dir().join(format!("sp-test-{}.sqlite3", Uuid::new_v4()));
+        // Use a nested .sp dir so hidden_state_dir works correctly
+        let base = std::env::temp_dir().join(format!("sp-test-{}", Uuid::new_v4()));
+        let state_dir = base.join(".sp");
+        ensure_state_tree(&state_dir).expect("state tree");
+        ensure_state_tree(&hidden_state_dir(&state_dir)).expect("hidden state tree");
         Orchestrator {
-            store: Store::open(&db_path).expect("store"),
+            store: Store::open(&state_dir).expect("store"),
             prompts: crate::templates::PromptLibrary::load(),
         }
     }
@@ -4333,6 +4980,44 @@ mod tests {
             vec![record.name.clone()],
         );
         probe
+    }
+
+    fn test_launch_config(mission: &str, worker_count: usize) -> LaunchConfig {
+        LaunchConfig {
+            worker_agent: AgentKind::Qwen,
+            supervisor_agent: AgentKind::Qwen,
+            worker_count,
+            repo: PathBuf::from("."),
+            mission: mission.to_owned(),
+            state_dir: PathBuf::from(".sp"),
+            dry_run: true,
+            stall_seconds: 45,
+            watchdog_max_seconds: None,
+            watchdog_tick_millis: 1000,
+            tmux: false,
+            tmux_session_name: None,
+            persist_transcripts: false,
+            tui: false,
+            worker_args: Vec::new(),
+            supervisor_args: Vec::new(),
+            git_remote: None,
+        }
+    }
+
+    fn test_control_surface() -> super::ControlSurface {
+        let root = std::env::temp_dir().join(format!("sp-control-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workers")).expect("workers dir");
+        std::fs::create_dir_all(root.join("transcripts")).expect("transcripts dir");
+        super::ControlSurface {
+            state_dir: root.clone(),
+            status_file: root.join("control/status.txt"),
+            dashboard_file: root.join("control/dashboard.txt"),
+            transcript_dir: root.join("transcripts"),
+            workers_state_dir: root.join("workers"),
+            hidden_root: root.join(".hide.sp"),
+            persist_transcripts: false,
+            tmux_session_names: Vec::new(),
+        }
     }
 
     fn sample_plan(worker_count: usize) -> MissionPlan {
@@ -4398,6 +5083,42 @@ mod tests {
         assert_eq!(plan.worker_packets.len(), 2);
         assert_eq!(plan.workstreams.len(), 2);
         assert_eq!(plan.worker_packets[0].display_name, "Validator-1");
+    }
+
+    #[test]
+    fn lean_coordination_profile_uses_deterministic_planning() {
+        let config = test_launch_config(
+            "Talk to your teammate and prove the team can work together.",
+            3,
+        );
+        let profile = mission_profile::MissionProfile::from_launch(&config);
+        assert!(profile.coordination_focused);
+        assert!(profile.deterministic_planning);
+        assert!(profile.lean_supervision);
+        assert!(!profile.enable_repair_supervisor);
+        assert!(!profile.enable_state_cards);
+    }
+
+    #[test]
+    fn coordination_plan_requires_real_teammate_mail() {
+        let profile = mission_profile::MissionProfile::from_launch(&test_launch_config(
+            "Talk to your teammate and prove the team can work together.",
+            3,
+        ));
+        let plan = mission_profile::deterministic_plan_for_mission(
+            "Talk to your teammate and prove the team can work together.",
+            3,
+            profile,
+        );
+        assert_eq!(plan.worker_packets.len(), 3);
+        assert!(plan.worker_packets[0]
+            .communication_rules
+            .iter()
+            .any(|rule| rule.contains("SAPPHIRE_MAIL")));
+        assert!(plan.worker_packets[0]
+            .definition_of_done
+            .iter()
+            .any(|rule| rule.contains("mail thread")));
     }
 
     #[test]
@@ -4479,8 +5200,8 @@ mod tests {
         assert_eq!(stats.stall_interventions, 0);
         assert_eq!(pending_supervisor_decisions.len(), 1);
         let supervisor_text = supervisor_probe.sent_texts().join("\n");
-        assert!(supervisor_text.contains("Supervisor intervention required."));
         assert!(supervisor_text.contains("appears stalled"));
+        assert!(supervisor_text.contains("Decide whether to"));
     }
 
     #[test]
@@ -4529,6 +5250,8 @@ mod tests {
 
         orchestrator
             .handle_pending_supervisor_decisions(
+                mission_id,
+                worker_id,
                 &mut active_sessions,
                 &mut pending_supervisor_decisions,
             )
@@ -4904,6 +5627,120 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_notice_is_suppressed_across_interleaved_notices() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        let supervisor_probe = insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+
+        orchestrator
+            .send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                &mut active_sessions,
+                SupervisorEventType::Contradiction,
+                "Resolve overlap on src/main.rs.",
+            )
+            .expect("first notice");
+        orchestrator
+            .send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                &mut active_sessions,
+                SupervisorEventType::Notice,
+                "Background status changed.",
+            )
+            .expect("interleaved notice");
+        orchestrator
+            .send_supervisor_notice(
+                mission_id,
+                supervisor_id,
+                &mut active_sessions,
+                SupervisorEventType::Contradiction,
+                "Resolve overlap on src/main.rs.",
+            )
+            .expect("duplicate contradiction notice");
+
+        let sent = supervisor_probe.sent_texts();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("Resolve overlap on src/main.rs."));
+        let supervisor = active_sessions.get(&supervisor_id).expect("supervisor");
+        assert_eq!(supervisor.queued_prompts.len(), 1);
+        assert!(supervisor
+            .queued_prompts
+            .front()
+            .expect("queued notice")
+            .body
+            .contains("Background status changed."));
+    }
+
+    #[test]
+    fn overlap_detail_ignores_none_detected_language() {
+        assert_eq!(
+            enforcement::meaningful_overlap_detail(Some("none detected yet")),
+            None
+        );
+        assert_eq!(
+            enforcement::meaningful_overlap_detail(Some("no overlap")),
+            None
+        );
+        assert_eq!(
+            enforcement::meaningful_overlap_detail(Some("src/main.rs changed by Engineer-2")),
+            Some("src/main.rs changed by Engineer-2".to_owned())
+        );
+    }
+
+    #[test]
+    fn zombie_debounce_does_not_flag_idle_worker_without_dead_terminal_signal() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+        let worker = active_sessions.get_mut(&worker_id).expect("worker");
+        worker.last_confirmed_alive = Instant::now() - Duration::from_secs(120);
+        worker.startup_grace_until = Instant::now() - Duration::from_secs(1);
+
+        let mut stats = WatchdogStats::default();
+        orchestrator
+            .zombie_debounce_check(mission_id, &mut active_sessions, &mut stats)
+            .expect("zombie debounce");
+
+        assert_eq!(stats.critical_failures, 0);
+        assert_eq!(
+            active_sessions
+                .get(&worker_id)
+                .expect("worker")
+                .zombie_debounce
+                .consecutive_zombie_count,
+            0
+        );
+    }
+
+    #[test]
     fn queued_prompts_drain_one_at_a_time() {
         let mission_id = Uuid::new_v4();
         let worker_id = Uuid::new_v4();
@@ -5056,6 +5893,282 @@ mod tests {
                 .consecutive_probe_failures,
             1
         );
+    }
+
+    #[test]
+    fn supervisor_output_does_not_trigger_worker_state_heuristics() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+        let mut leases = HashMap::new();
+        let mut pending_mail = HashMap::new();
+        let mut pending_supervisor_decisions = HashMap::new();
+        let mut recent_failures = Vec::new();
+        let mut mass_death_detector = crate::orchestrator::health::MassDeathDetector::default();
+        let mut stats = WatchdogStats::default();
+        let control_surface = test_control_surface();
+
+        orchestrator
+            .handle_runtime_event(
+                mission_id,
+                Path::new("."),
+                supervisor_id,
+                &RuntimeEvent::Output {
+                    session_id: supervisor_id,
+                    chunk: "waiting on dependency review".to_owned(),
+                },
+                &mut active_sessions,
+                &alias_map,
+                &mut leases,
+                &mut pending_mail,
+                &mut pending_supervisor_decisions,
+                &mut recent_failures,
+                &mut mass_death_detector,
+                false,
+                &mut stats,
+                &control_surface,
+            )
+            .expect("runtime event");
+
+        assert_eq!(
+            active_sessions
+                .get(&supervisor_id)
+                .expect("supervisor")
+                .state,
+            SessionState::Progressing
+        );
+    }
+
+    #[test]
+    fn worker_output_does_not_trigger_heuristics_inline() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+        let mut leases = HashMap::new();
+        let mut pending_mail = HashMap::new();
+        let mut pending_supervisor_decisions = HashMap::new();
+        let mut recent_failures = Vec::new();
+        let mut mass_death_detector = crate::orchestrator::health::MassDeathDetector::default();
+        let mut stats = WatchdogStats::default();
+        let control_surface = test_control_surface();
+
+        orchestrator
+            .handle_runtime_event(
+                mission_id,
+                Path::new("."),
+                supervisor_id,
+                &RuntimeEvent::Output {
+                    session_id: worker_id,
+                    chunk: "waiting on dependency review".to_owned(),
+                },
+                &mut active_sessions,
+                &alias_map,
+                &mut leases,
+                &mut pending_mail,
+                &mut pending_supervisor_decisions,
+                &mut recent_failures,
+                &mut mass_death_detector,
+                false,
+                &mut stats,
+                &control_surface,
+            )
+            .expect("runtime event");
+
+        assert_eq!(
+            active_sessions.get(&worker_id).expect("worker").state,
+            SessionState::Progressing
+        );
+        assert!(pending_supervisor_decisions.is_empty());
+    }
+
+    #[test]
+    fn settled_worker_output_triggers_heuristics_after_quiet_window() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+
+        let worker = active_sessions.get_mut(&worker_id).expect("worker");
+        worker.raw_buffer = "waiting on dependency review".to_owned();
+        worker.output_chunks = 1;
+        worker.startup_grace_until = Instant::now() - Duration::from_secs(1);
+        worker.last_output_at = Instant::now() - Duration::from_secs(HEURISTIC_SETTLE_THRESHOLD.as_secs() + 1);
+        worker.last_confirmed_alive = worker.last_output_at;
+
+        let mut pending_supervisor_decisions = HashMap::new();
+        let mut stats = WatchdogStats::default();
+        orchestrator
+            .handle_settled_worker_observations(
+                mission_id,
+                Path::new("."),
+                supervisor_id,
+                &mut active_sessions,
+                &mut pending_supervisor_decisions,
+                false,
+                &mut stats,
+            )
+            .expect("settled observations");
+
+        assert_eq!(
+            active_sessions.get(&worker_id).expect("worker").state,
+            SessionState::Blocked
+        );
+    }
+
+    #[test]
+    fn fresh_output_clears_stale_interventions() {
+        let orchestrator = test_orchestrator();
+        let mission_id = Uuid::new_v4();
+        let supervisor_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut active_sessions = HashMap::new();
+        let mut alias_map = HashMap::new();
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                supervisor_id,
+                "supervisor-01",
+                SessionRole::Supervisor,
+                SessionState::Progressing,
+            ),
+        );
+        insert_session(
+            &mut active_sessions,
+            &mut alias_map,
+            make_session(
+                mission_id,
+                worker_id,
+                "Engineer-1",
+                SessionRole::Worker,
+                SessionState::Progressing,
+            ),
+        );
+
+        let worker = active_sessions.get_mut(&worker_id).expect("worker");
+        worker.queued_prompt_keys.insert("stale".to_owned());
+        worker.queued_prompts.push_back(QueuedPrompt {
+            key: "stale".to_owned(),
+            body: "Status update only.".to_owned(),
+        });
+        let mut leases = HashMap::new();
+        let mut pending_mail = HashMap::new();
+        let mut pending_supervisor_decisions = HashMap::new();
+        assert!(queue_supervisor_decision(
+            &mut pending_supervisor_decisions,
+            SupervisorDecisionKind::LowConfidenceRecovery,
+            worker_id,
+            "stale weak output"
+        ));
+        assert!(queue_supervisor_decision(
+            &mut pending_supervisor_decisions,
+            SupervisorDecisionKind::StallRecovery,
+            worker_id,
+            "stale stall"
+        ));
+        assert!(queue_supervisor_decision(
+            &mut pending_supervisor_decisions,
+            SupervisorDecisionKind::Validation,
+            worker_id,
+            "validation should remain"
+        ));
+        let mut recent_failures = Vec::new();
+        let mut mass_death_detector = crate::orchestrator::health::MassDeathDetector::default();
+        let mut stats = WatchdogStats::default();
+        let control_surface = test_control_surface();
+
+        orchestrator
+            .handle_runtime_event(
+                mission_id,
+                Path::new("."),
+                supervisor_id,
+                &RuntimeEvent::Output {
+                    session_id: worker_id,
+                    chunk: "still working".to_owned(),
+                },
+                &mut active_sessions,
+                &alias_map,
+                &mut leases,
+                &mut pending_mail,
+                &mut pending_supervisor_decisions,
+                &mut recent_failures,
+                &mut mass_death_detector,
+                false,
+                &mut stats,
+                &control_surface,
+            )
+            .expect("runtime event");
+
+        let worker = active_sessions.get(&worker_id).expect("worker");
+        assert!(worker.queued_prompts.is_empty());
+        assert!(worker.queued_prompt_keys.is_empty());
+        assert_eq!(pending_supervisor_decisions.len(), 1);
+        assert!(pending_supervisor_decisions
+            .values()
+            .all(|pending| pending.kind == SupervisorDecisionKind::Validation));
     }
 
     #[test]
@@ -5777,72 +6890,30 @@ fn render_supervisor_prompt_with_agents(
     agents_bootstrap: &AgentsBootstrap,
     requested_workers: usize,
 ) -> String {
-    format!(
-        "{base_prompt}\n\n---\n\n# AGENTS.md PROTOCOL\n\n- AGENTS path: {path}\n- AGENTS status at session start: {status}\n- Total worker terminals requested: {requested_workers}\n- Worker packet count must equal {requested_workers}. Do not invent extra workers, stewards, alternates, or helper terminals.\n- Every newly launched worker must read AGENTS.md on first initialization only, before real work.\n- AGENTS.md is repository guidance, not an implicit reserved worker role.\n- Use the following exact instruction source only if AGENTS.md must be created or refreshed:\n\n{instruction_source}\n",
-        path = agents_bootstrap.path.display(),
-        status = if agents_bootstrap.existed {
-            "already present"
-        } else {
-            "created before worker launch"
-        },
-        instruction_source = agents_bootstrap_instruction_source(agents_bootstrap),
+    prompt_contracts::render_supervisor_bootstrap(
+        base_prompt,
+        &agents_bootstrap.path,
+        agents_bootstrap.existed,
+        requested_workers,
     )
 }
 
 fn render_worker_prompt_with_agents(
     base_prompt: String,
     agents_bootstrap: &AgentsBootstrap,
+    state_dir: &Path,
     packet: &WorkerPacket,
     git_remote: Option<&str>,
+    memory_block: Option<&str>,
 ) -> String {
-    let display_name = &packet.display_name;
-    let prompt_path = format!(".sp/prompts/{display_name}.md");
-    let hidden_prompt_path = format!(".hide.sp/prompts/{display_name}.md");
-    let status_path = format!(".sp/workers/{display_name}/status.json");
-    let hidden_status_path = format!(".hide.sp/workers/{display_name}/status.json");
-    let memory_path = format!(".sp/workers/{display_name}/memory.json");
-    let hidden_memory_path = format!(".hide.sp/workers/{display_name}/memory.json");
-    let preferred_counterparts = coordination::preferred_counterparts(&packet.role_type).join(", ");
-
-    let git_rules = if git_remote.is_some() {
-        GIT_COMMIT_RULES
-    } else {
-        ""
-    };
-
-    format!(
-        "Repository bootstrap:\n1. Read {path} once before real work.\n2. Do not edit AGENTS.md unless your assigned task explicitly requires it or the supervisor reroutes you.\n3. Prompt file order: {prompt_path} first. Only if missing, use {hidden_prompt_path}.\n4. Status JSON order: write {status_path} first. Only if that fails, write {hidden_status_path}. Only if both fail, print one single-line SAPPHIRE_STATUS JSON.\n5. Memory file order: read {memory_path} first. Only if missing, read {hidden_memory_path}.\n6. Preferred coordination lanes for your role: {preferred_counterparts}.\n7. Real team rule: if another worker can unblock you faster than the supervisor, mail the worker first. Use the supervisor for rulings, failed coordination, or contradictions.\n\n{git_rules}{base_prompt}",
-        path = agents_bootstrap.path.display(),
-        prompt_path = prompt_path,
-        hidden_prompt_path = hidden_prompt_path,
-        status_path = status_path,
-        hidden_status_path = hidden_status_path,
-        memory_path = memory_path,
-        hidden_memory_path = hidden_memory_path,
-        preferred_counterparts = preferred_counterparts,
+    prompt_contracts::render_worker_bootstrap(
+        base_prompt,
+        &agents_bootstrap.path,
+        state_dir,
+        packet,
+        git_remote,
+        memory_block,
     )
-}
-
-/// Strict git commit rules injected into every worker prompt when a remote exists.
-const GIT_COMMIT_RULES: &str = r#"
-GIT WORKFLOW RULES (STRICT — VIOLATE ANY = FAILURE):
-1. COMMIT AFTER EVERY CHANGE: After every incremental update, you MUST `git add` and `git commit`. Do NOT batch commits. Do NOT wait until the end.
-2. COMMIT MESSAGE STYLE: Write like a professional human engineer. Concise, clear, neutral. 5-15 words max. Describe WHAT changed and WHY if non-obvious. Examples:
-   - Good: "Add auth middleware with JWT validation"
-   - Good: "Fix race condition in connection pool shutdown"
-   - Bad: "Updated files" (too vague)
-   - Bad: "Made changes to improve the overall quality of the codebase by refactoring several functions and updating documentation" (too long)
-3. FORBIDDEN COMMANDS: You are STRICTLY FORBIDDEN from using `git restore` or `git reset`. NEVER. Under any circumstances. If you need to undo something, create a new commit that reverts the change.
-4. ALLOWED COMMANDS: `git status`, `git log`, `git diff`, `git branch`, `git checkout`, `git switch`, `git add`, `git commit`, `git stash`, `git tag`, `git remote`, `git fetch`. All read-only commands are fine.
-5. DIRTY TREE: If `git status --porcelain` shows output, the tree is dirty. IGNORE IT. Multiple agents commit in parallel — dirty trees are normal. Only stop and ask for help if `git status --porcelain` itself fails (corrupted index).
-6. PRE-COMMIT LOCK: Before `git commit`, wait 1 second and check if `.git/sapphire-commit.lock` exists. If it does, another agent is committing — wait up to 10 seconds for it to disappear, then retry your commit.
-7. BRANCH OPERATIONS: You may create branches (`git checkout -b feature/name`), delete branches (`git branch -d name`), and create pull requests. NEVER push to `main`.
-8. NO PUSH TO MAIN: You may `git push` to your own feature branches. NEVER push to main.
-
-"#;
-
-fn agents_bootstrap_instruction_source(_agents_bootstrap: &AgentsBootstrap) -> &'static str {
-    PromptLibrary::load().agents_instruction_source()
 }
 
 fn generate_agents_md(repo: &Path, prompts: &PromptLibrary) -> Result<String> {
@@ -5984,7 +7055,7 @@ fn render_critical_files(repo: &Path) -> Result<String> {
 }
 
 fn write_prompt_file(state_dir: &Path, session_name: &str, prompt: &str) -> Result<()> {
-    let path = state_dir.join("prompts").join(format!("{session_name}.md"));
+    let path = launch_prompt::prompt_file_path(state_dir, session_name);
     write_string_to_file(&path, prompt)?;
     let hidden_path = hidden_state_dir(state_dir)
         .join("prompts")
@@ -6046,13 +7117,6 @@ fn append_to_file(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn database_path(config: &LaunchConfig) -> PathBuf {
-    config
-        .db_path
-        .clone()
-        .unwrap_or_else(|| config.state_dir.join("sapphire.sqlite3"))
-}
-
 fn launch_command(program: &str, args: &[String]) -> Vec<String> {
     let mut command = vec![program.to_owned()];
     command.extend(args.iter().cloned());
@@ -6064,22 +7128,28 @@ fn rebuild_launch_spec(
     repo: &Path,
     state_dir: &Path,
 ) -> ProcessLaunchSpec {
-    let cwd = if session.role == SessionRole::Supervisor {
-        supervisor_runtime_root(state_dir)
-    } else {
-        repo.to_path_buf()
-    };
-    let mut base = session.agent.build_launch_spec(&cwd, state_dir, &[]);
+    let mut base = session.agent.build_launch_spec(repo, state_dir, &[]);
     if let Some((program, args)) = session.launch_command.split_first() {
         base.program = program.clone();
         base.args = args.to_vec();
+    }
+    if session.role == SessionRole::Supervisor {
+        base = harden_supervisor_launch_spec(session.agent, base);
     }
     base.surface_label = session.name.clone();
     base
 }
 
-fn supervisor_runtime_root(state_dir: &Path) -> PathBuf {
-    state_dir.join("supervisor-runtime")
+fn harden_supervisor_launch_spec(
+    agent: crate::agent::AgentKind,
+    mut spec: ProcessLaunchSpec,
+) -> ProcessLaunchSpec {
+    if agent == crate::agent::AgentKind::Qwen
+        && !spec.args.iter().any(|arg| arg == "--screen-reader")
+    {
+        spec.args.insert(0, "--screen-reader".to_owned());
+    }
+    spec
 }
 
 /// Build a concise state card for the supervisor's periodic refresh.
@@ -6241,6 +7311,61 @@ fn queue_supervisor_state_card(
     send_or_queue_prompt(supervisor_session, &prompt)
 }
 
+/// Save a terminal-state memory snapshot for a worker.
+/// This is the real persistent memory: when a worker finishes (validated, failed, or exited),
+/// their complete session memory is saved. On the NEXT mission, an agent with the same
+/// display_name and role_type will read this and know what happened last time.
+fn save_terminal_memory_snapshot(
+    store: &Store,
+    mission_id: Uuid,
+    session_id: Uuid,
+    display_name: &str,
+    active_sessions: &HashMap<Uuid, ActiveSession>,
+    final_state: &SessionState,
+    summary: &str,
+    files_touched: &[String],
+    risks: &[String],
+) -> Result<()> {
+    let mem_store = store.agent_memory();
+
+    // Load existing incremental memory (already being updated on each status report)
+    let Some(mut memory) = mem_store.load_memory(&mission_id, display_name)? else {
+        return Ok(());
+    };
+
+    let session = active_sessions.get(&session_id);
+    let packet = session.and_then(|s| s.packet.as_ref());
+
+    // Fill in gaps that incremental updates may have missed
+    if memory.role_type.is_empty() {
+        memory.role_type = packet.map(|p| p.role_type.clone()).unwrap_or_default();
+    }
+    if memory.owned_scope.is_empty() {
+        if let Some(scope) = packet.and_then(|p| {
+            let s = p.owned_scope.trim();
+            if s.is_empty() { None } else { Some(s) }
+        }) {
+            memory.owned_scope = scope.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+        }
+    }
+    for f in files_touched {
+        if !memory.files_touched.contains(f) {
+            memory.files_touched.push(f.clone());
+        }
+    }
+    for risk in risks {
+        if !memory.blockers.contains(risk) {
+            memory.blockers.push(risk.clone());
+        }
+    }
+
+    // Terminal state and final summary
+    memory.final_state = final_state.as_str().to_owned();
+    memory.summary = truncate(summary, 240);
+
+    mem_store.save_memory(&mission_id, display_name, &memory)
+}
+
 /// Map a session state to the appropriate supervisor event type.
 /// Determines which rule gets injected into the supervisor micro-prompt.
 fn event_type_for_state(state: &SessionState) -> SupervisorEventType {
@@ -6292,12 +7417,18 @@ fn record_intervention_response(session: &mut ActiveSession, now: Instant) {
 // ─── Nudge Queue (from gastown wait-idle nudge pattern) ─────────────────────
 
 const NUDGE_QUIET_THRESHOLD: Duration = Duration::from_secs(3);
+const HEURISTIC_SETTLE_THRESHOLD: Duration = Duration::from_secs(8);
 
 /// Check if the agent is mid-response (recent output activity).
 /// If true, injecting a prompt now would conflict with the TUI readline.
 fn is_agent_mid_response(session: &ActiveSession) -> bool {
     session.last_output_at.elapsed() < NUDGE_QUIET_THRESHOLD
         && session.output_chunks > 0
+}
+
+fn worker_output_has_settled(session: &ActiveSession, now: Instant) -> bool {
+    session.output_chunks > 0
+        && now.duration_since(session.last_output_at) >= HEURISTIC_SETTLE_THRESHOLD
 }
 
 fn prompt_fingerprint(prompt: &str) -> String {
@@ -6307,6 +7438,10 @@ fn prompt_fingerprint(prompt: &str) -> String {
 
 fn prompt_repeat_suppression_window() -> Duration {
     Duration::from_secs(180)
+}
+
+fn supervisor_notice_repeat_suppression_window() -> Duration {
+    Duration::from_secs(240)
 }
 
 fn prompt_queue_limit() -> usize {
@@ -6342,11 +7477,57 @@ fn remember_prompt_delivery(session: &mut ActiveSession, key: String, now: Insta
     }
 }
 
+fn clear_superseded_prompt_queue(session: &mut ActiveSession) {
+    if session.queued_prompts.is_empty() {
+        return;
+    }
+    session.queued_prompts.clear();
+    session.queued_prompt_keys.clear();
+}
+
+fn prune_recent_supervisor_notice_keys(session: &mut ActiveSession, now: Instant) {
+    while session
+        .recent_supervisor_notice_keys
+        .front()
+        .is_some_and(|(_, sent_at)| {
+            now.duration_since(*sent_at) > supervisor_notice_repeat_suppression_window()
+        })
+    {
+        session.recent_supervisor_notice_keys.pop_front();
+    }
+}
+
+fn has_recent_supervisor_notice_key(session: &ActiveSession, key: &str) -> bool {
+    session
+        .recent_supervisor_notice_keys
+        .iter()
+        .any(|(existing, _)| existing == key)
+}
+
+fn remember_supervisor_notice(session: &mut ActiveSession, key: String, now: Instant) {
+    session.last_supervisor_notice_key = Some(key.clone());
+    session.recent_supervisor_notice_keys.push_back((key, now));
+    while session.recent_supervisor_notice_keys.len() > 32 {
+        session.recent_supervisor_notice_keys.pop_front();
+    }
+}
+
 fn has_recent_status_activity(session: &ActiveSession, now: Instant) -> bool {
     session.last_status_update_at.is_some_and(|at| {
         now.duration_since(at)
             < Duration::from_secs(supervisor::STATUS_FILE_LIVENESS_GRACE_SECS * 3)
     })
+}
+
+fn session_tmux_health(session: &ActiveSession) -> Option<tmux::SessionHealth> {
+    session.last_tmux_health
+}
+
+fn session_has_live_terminal(session: &ActiveSession) -> bool {
+    matches!(
+        session_tmux_health(session),
+        Some(tmux::SessionHealth::Healthy | tmux::SessionHealth::Hung | tmux::SessionHealth::Starting)
+    )
 }
 
 fn effective_stall_threshold(session: &ActiveSession, stall_after: Duration) -> Duration {
@@ -6357,10 +7538,70 @@ fn effective_stall_threshold(session: &ActiveSession, stall_after: Duration) -> 
     }
 }
 
+fn tmux_health_refresh_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn refresh_tmux_health_cache(active_sessions: &mut HashMap<Uuid, ActiveSession>) {
+    let now = Instant::now();
+    for session in active_sessions.values_mut() {
+        if session.state.is_terminal() {
+            continue;
+        }
+        if session
+            .last_tmux_health_checked_at
+            .is_some_and(|checked| now.duration_since(checked) < tmux_health_refresh_interval())
+        {
+            continue;
+        }
+        session.last_tmux_health_checked_at = Some(now);
+        session.last_tmux_health = session.runtime.terminal_target().map(|target| {
+            tmux::Tmux::new(None).check_session_health(target, zombie_check_max_inactivity())
+        });
+    }
+}
+
 fn recently_prompted(session: &ActiveSession, now: Instant) -> bool {
     session
         .last_prompt_sent_at
         .is_some_and(|last| now.duration_since(last) < prompt_dispatch_interval(session))
+}
+
+fn send_prompt_immediately(
+    session: &mut ActiveSession,
+    prompt: &str,
+) -> Result<()> {
+    let now = Instant::now();
+    let key = prompt_fingerprint(prompt);
+    prune_recent_prompt_keys(session, now);
+
+    // Hard dedup: if this exact prompt was recently sent to this session, skip it.
+    // Prevents duplicate paste even if launch_prompt_sent guard fails elsewhere.
+    if has_recent_prompt_key(session, &key) {
+        warn!(
+            worker = %session.record.name,
+            key = %key,
+            "BLOCKED duplicate prompt delivery (same hash recently sent)"
+        );
+        return Ok(());
+    }
+
+    // Readiness guard: never inject a prompt while the agent is mid-response.
+    // This prevents prompt text from being buffered/echoed by the shell instead
+    // of being consumed by the agent's TUI readline.
+    if is_agent_mid_response(session) {
+        let elapsed = now.saturating_duration_since(session.last_output_at);
+        warn!(
+            worker = %session.record.name,
+            elapsed_ms = elapsed.as_millis(),
+            "send_prompt_immediately: agent mid-response, delaying 500ms"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    session.runtime.send_prompt(prompt)?;
+    remember_prompt_delivery(session, key, now);
+    Ok(())
 }
 
 /// Try to send a prompt, or queue it if the agent is mid-response.
@@ -6418,4 +7659,18 @@ fn drain_prompt_queues(
     for (_, prompt) in &drained {
         tracing::debug!("drained queued prompt: {}", prompt.chars().take(80).collect::<String>());
     }
+}
+
+/// Text similarity helper for validating worker packet differentiation.
+fn text_similarity_sim(a: &str, b: &str) -> f64 {
+    let a_lower = a.to_ascii_lowercase();
+    let b_lower = b.to_ascii_lowercase();
+    let words_a: std::collections::HashSet<_> = a_lower.split_whitespace().collect();
+    let words_b: std::collections::HashSet<_> = b_lower.split_whitespace().collect();
+    if words_a.is_empty() && words_b.is_empty() { return 1.0; }
+    if words_a.is_empty() || words_b.is_empty() { return 0.0; }
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+    if union == 0 { return 0.0; }
+    intersection as f64 / union as f64
 }

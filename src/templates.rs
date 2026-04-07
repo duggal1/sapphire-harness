@@ -79,6 +79,10 @@ impl PromptLibrary {
     }
 
     pub fn render_supervisor_prompt(&self, mission: &str, plan: &MissionPlan) -> String {
+        let template = compact_prompt_source(self.supervisor_template, 140);
+        let product_direction = compact_prompt_source(self.product_direction, 80);
+        let supervisor_builder = compact_prompt_source(self.supervisor_builder, 70);
+        let communication_spec = compact_prompt_source(self.communication_spec, 90);
         format!(
             "{template}
 
@@ -125,10 +129,10 @@ Supervision Strategy:
 Sapphire Control Protocol:
 {control_protocol}
 ",
-            template = self.supervisor_template,
-            product_direction = self.product_direction,
-            supervisor_builder = self.supervisor_builder,
-            communication_spec = self.communication_spec,
+            template = template,
+            product_direction = product_direction,
+            supervisor_builder = supervisor_builder,
+            communication_spec = communication_spec,
             mission = mission.trim(),
             mission_rewrite = plan.mission_rewrite,
             workstreams = render_workstreams(plan),
@@ -148,13 +152,16 @@ Sapphire Control Protocol:
     /// The role template provides the full job description.
     /// The packet provides the specific assignment scoped to that role.
     pub fn render_worker_prompt(&self, mission: &str, packet: &WorkerPacket) -> String {
+        // Use the FULL role template — not compacted. Every agent gets the complete
+        // job description with all responsibilities, rules, coordination protocols,
+        // git rules, pushback policy, and definition of done.
         let role_template = match self.role_template(&packet.role_type) {
-            Some(t) => compact_role_template(t),
+            Some(t) => t.to_string(),
             None => format!("# {}\n\nNo role template available for role_type '{}'.\nFollow the mission and packet instructions.\n", packet.display_name, packet.role_type),
         };
 
         format!(
-            "{role_template}\n\n## Assignment\n- Display Name: {display_name}\n- Role Type: {role_type}\n- Mission: {mission}\n- Starting Angle: {starting_angle}\n- Owned Scope: {owned_scope}\n- Explicit Task: {explicit_task}\n- Out of Scope: {out_of_scope}\n- Definition of Done: {definition_of_done}\n- Required Evidence: {required_evidence}\n- Blocker Protocol: {blocker_protocol}\n- Conflict Warning: {conflict_warning}\n- Communication Rules: {communication_rules}\n- Validation Standard: {validation_standard}\n- Expected Output Format: {expected_output_format}\n\n## Sapphire Control Protocol\n{control_protocol}\n",
+            "{role_template}\n\n## Assignment\n- Worker: {display_name} ({role_type})\n- Mission: {mission}\n- Scope: {owned_scope}\n- Task: {explicit_task}\n- Out of scope: {out_of_scope}\n- Starting angle: {starting_angle}\n- Done when: {definition_of_done}\n- Evidence: {required_evidence}\n- Blocker protocol: {blocker_protocol}\n- Conflict warning: {conflict_warning}\n- Communication rules: {communication_rules}\n- Validation standard: {validation_standard}\n- Expected output: {expected_output_format}\n\n## Sapphire Control Protocol\n{control_protocol}\n",
             role_template = &role_template,
             display_name = packet.display_name,
             role_type = packet.role_type,
@@ -173,6 +180,38 @@ Sapphire Control Protocol:
             control_protocol = control_protocol(false),
         )
     }
+}
+
+fn compact_prompt_source(source: &str, max_lines: usize) -> String {
+    let mut kept = Vec::new();
+    let mut trailing_blank = false;
+
+    for line in source.lines() {
+        if kept.len() >= max_lines {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if trailing_blank || kept.is_empty() {
+                continue;
+            }
+            trailing_blank = true;
+            kept.push(String::new());
+            continue;
+        }
+        trailing_blank = false;
+        kept.push(trimmed.to_owned());
+    }
+
+    while kept.last().is_some_and(|line| line.is_empty()) {
+        kept.pop();
+    }
+
+    let mut compacted = kept.join("\n");
+    if source.lines().count() > max_lines {
+        compacted.push_str("\n\n[truncated for runtime brevity; follow the operating rules above]");
+    }
+    compacted
 }
 
 fn render_workstreams(plan: &MissionPlan) -> String {
@@ -269,6 +308,7 @@ fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[allow(dead_code)]
 fn compact_role_template(raw: &str) -> String {
     let title = raw
         .lines()
@@ -286,11 +326,16 @@ fn compact_role_template(raw: &str) -> String {
         .map(|value| truncate_sentence(&single_line(&value), 180))
         .unwrap_or_else(|| "Push back briefly when the requested path is technically wrong, unsafe, or bloated.".to_owned());
 
+    // New role templates already include "Operating Rules" with team awareness,
+    // git discipline, and coordination rules. Use them directly — don't synthesize.
+    let operating_rules = markdown_section_bullets(raw, "## Operating Rules", 6);
+
     format!(
-        "{title}\n\n## Mission\n{mission}\n\n## Operating Rules\n- This is a job role, not a persona.\n- Report to the Supervisor / CEO / execution authority.\n- Read AGENTS.md first when instructed.\n- Stay concise, factual, modular, and high-signal.\n- Never use destructive git cleanup without explicit approval.\n\n## Core Responsibilities\n{responsibilities}\n\n## Coordination\n{coordination}\n\n## Pushback\n{pushback}\n\n## Definition of Done\n{definition_of_done}\n\n## First Steps\n{first_steps}"
+        "{title}\n\n## Mission\n{mission}\n\n## Operating Rules\n{operating_rules}\n\n## Core Responsibilities\n{responsibilities}\n\n## Coordination\n{coordination}\n\n## Pushback\n{pushback}\n\n## Definition of Done\n{definition_of_done}\n\n## First Steps\n{first_steps}"
     )
 }
 
+#[allow(dead_code)]
 fn markdown_section_body(raw: &str, heading: &str) -> Option<String> {
     let start = raw.find(heading)?;
     let rest = &raw[start + heading.len()..];
@@ -306,6 +351,7 @@ fn markdown_section_body(raw: &str, heading: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn markdown_section_bullets(raw: &str, heading: &str, max_items: usize) -> String {
     let Some(body) = markdown_section_body(raw, heading) else {
         return "- none".to_owned();
@@ -323,6 +369,7 @@ fn markdown_section_bullets(raw: &str, heading: &str, max_items: usize) -> Strin
     }
 }
 
+#[allow(dead_code)]
 fn markdown_section_lines(raw: &str, heading: &str, max_items: usize) -> String {
     let Some(body) = markdown_section_body(raw, heading) else {
         return "1. Read the task.\n2. Choose the smallest clean path.".to_owned();
@@ -340,6 +387,7 @@ fn markdown_section_lines(raw: &str, heading: &str, max_items: usize) -> String 
     }
 }
 
+#[allow(dead_code)]
 fn truncate_sentence(value: &str, max_chars: usize) -> String {
     let mut out = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
@@ -362,15 +410,68 @@ fn control_protocol(supervisor: bool) -> String {
     if supervisor {
         lines.push("Use mail for corrections, proof requests, validation challenges, and conflict rulings.".to_owned());
         lines.push("Human-readable supervision can be short, but the control line must still be exact.".to_owned());
+        lines.push("Act like the strict execution authority: push back on drift, answer continue-or-stop questions directly, and approve cleanup only when the whole team is actually done.".to_owned());
     } else {
         lines.push("If blocked on another agent, send mail instead of vague prose.".to_owned());
         lines.push("Coordination order: teammate first for dependencies, reviews, and handoffs; supervisor second for rulings or failed peer coordination.".to_owned());
         lines.push("When you receive mail, respond explicitly: SAPPHIRE_ACK status=acked if taking it, done if finished, cannot_comply with one concrete blocker if you cannot do it.".to_owned());
         lines.push("Use task for action requests, reply for answers or handoffs, notification for FYI, escalation only when supervisor visibility is genuinely required.".to_owned());
         lines.push("When claiming completion, use state done_claimed first. Do not assume acceptance before validation.".to_owned());
-        lines.push("Status file rule: .sp first, .hide.sp second, terminal SAPPHIRE_STATUS only as last fallback.".to_owned());
+        lines.push("Status file rule: use the assigned state-dir status path first, hidden fallback second, terminal SAPPHIRE_STATUS only as last fallback.".to_owned());
         lines.push("Status JSON fields: state, summary, files, commands, risks, overlap.".to_owned());
+        lines.push("Report back after prompt ingestion, on material progress, on blockers, on teammate waits, and before completion claims.".to_owned());
+        lines.push("Supervisor challenge beats watchdog noise: answer the supervisor with proof, not broad narration.".to_owned());
+        lines.push("You are not alone. Preserve teammate edits, coordinate narrow asks, and escalate only after peer coordination actually failed.".to_owned());
     }
 
     bullet_list(&lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PromptLibrary;
+    use crate::model::{MissionPlan, RiskItem, WorkerPacket, Workstream, WorkstreamExecution};
+
+    #[test]
+    fn supervisor_prompt_is_compacted_for_runtime() {
+        let prompts = PromptLibrary::load();
+        let plan = MissionPlan {
+            mission_rewrite: "Build the loc-scout Rust CLI".to_owned(),
+            workstreams: vec![Workstream {
+                id: "build".to_owned(),
+                name: "Build".to_owned(),
+                owned_scope: "src".to_owned(),
+                execution: WorkstreamExecution::Parallel,
+                depends_on: Vec::new(),
+                success_criteria: vec!["cargo build passes".to_owned()],
+            }],
+            risk_map: vec![RiskItem {
+                zone: "Coordination".to_owned(),
+                risk: "workers overlap".to_owned(),
+                mitigation: "tight ownership".to_owned(),
+            }],
+            worker_packets: vec![WorkerPacket {
+                role_type: "software-engineer".to_owned(),
+                display_name: "Engineer-1".to_owned(),
+                worker_id: "worker-1".to_owned(),
+                role: "Software Engineer".to_owned(),
+                starting_angle: "CLI".to_owned(),
+                owned_scope: "src/cli.rs".to_owned(),
+                explicit_task: "Implement the CLI".to_owned(),
+                out_of_scope: "tests".to_owned(),
+                definition_of_done: vec!["CLI parses flags".to_owned()],
+                required_evidence: vec!["cargo build".to_owned()],
+                blocker_protocol: "Escalate overlap".to_owned(),
+                conflict_warning: "Avoid main.rs collisions".to_owned(),
+                communication_rules: vec!["Mail teammates on overlap".to_owned()],
+                validation_standard: vec!["Show proof".to_owned()],
+                expected_output_format: vec!["STATE".to_owned()],
+            }],
+            supervision_strategy: "Keep scope tight.".to_owned(),
+        };
+
+        let prompt = prompts.render_supervisor_prompt("Build loc-scout", &plan);
+        assert!(prompt.lines().count() < 500);
+        assert!(prompt.contains("[truncated for runtime brevity"));
+    }
 }

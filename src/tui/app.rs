@@ -67,8 +67,9 @@ impl RenderCache {
     }
 }
 
-const DATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const DATA_REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TMUX_SESSION_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 impl TuiSession {
     pub fn enter() -> Result<Self> {
@@ -229,6 +230,7 @@ pub async fn run_startup_dashboard_until_tmux(
     let mut snapshot = data_source.snapshot(&attach_target)?;
     let mut render_cache = RenderCache::new();
     let mut last_refresh = Instant::now();
+    let mut last_tmux_check = Instant::now() - TMUX_SESSION_POLL_INTERVAL;
     let mut needs_redraw = true;
 
     loop {
@@ -255,8 +257,11 @@ pub async fn run_startup_dashboard_until_tmux(
             needs_redraw = false;
         }
 
-        if Tmux::new(None).has_session(session_name) {
-            return Ok(true);
+        if last_tmux_check.elapsed() >= TMUX_SESSION_POLL_INTERVAL {
+            last_tmux_check = Instant::now();
+            if Tmux::new(None).has_session(session_name) {
+                return Ok(true);
+            }
         }
         if task.is_finished() {
             return Ok(false);

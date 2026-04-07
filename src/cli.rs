@@ -35,6 +35,8 @@ pub struct Cli {
 pub enum Command {
     /// Show active/running missions at a glance
     Status,
+    /// Push the current branch through Sapphire's operator-owned git path
+    Push,
     /// List all missions (history)
     Sessions,
     /// Replay events for a mission
@@ -54,9 +56,6 @@ pub struct RunOptions {
 
     #[arg(long, value_enum)]
     pub supervisor_agent: Option<AgentKind>,
-
-    #[arg(long)]
-    pub db_path: Option<PathBuf>,
 
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
@@ -97,9 +96,6 @@ pub struct ResumeCommand {
     pub options: RuntimeOptions,
 
     #[arg(long)]
-    pub db_path: Option<PathBuf>,
-
-    #[arg(long)]
     pub state_dir: Option<PathBuf>,
 }
 
@@ -109,17 +105,11 @@ pub struct ReplayCommand {
 
     #[arg(long, short = 'n', default_value_t = 40)]
     pub limit: usize,
-
-    #[arg(long)]
-    pub db_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
 pub struct MissionArg {
     pub mission_id: Uuid,
-
-    #[arg(long)]
-    pub db_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -129,9 +119,6 @@ pub struct WatchCommand {
 
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: usize,
-
-    #[arg(long)]
-    pub db_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -160,7 +147,6 @@ pub struct LaunchConfig {
     pub worker_count: usize,
     pub repo: PathBuf,
     pub mission: String,
-    pub db_path: Option<PathBuf>,
     pub state_dir: PathBuf,
     pub dry_run: bool,
     pub stall_seconds: u64,
@@ -180,7 +166,6 @@ pub struct LaunchConfig {
 #[derive(Debug, Clone)]
 pub struct ResumeConfig {
     pub mission_id: Uuid,
-    pub db_path: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub stall_seconds: u64,
     pub watchdog_max_seconds: Option<u64>,
@@ -204,27 +189,28 @@ impl Cli {
         if let Some(command) = command {
             return match command {
                 Command::Status => Ok(CliAction::Status {
-                    db_path: run.db_path,
                     repo: run.repo,
                     state_dir: run.state_dir,
                 }),
+                Command::Push => Ok(CliAction::Push {
+                    repo: run
+                        .repo
+                        .canonicalize()
+                        .with_context(|| format!("failed to resolve repo path {}", run.repo.display()))?,
+                }),
                 Command::Sessions => Ok(CliAction::Sessions {
-                    db_path: run.db_path,
                     repo: run.repo,
                     state_dir: run.state_dir,
                 }),
                 Command::Replay(cmd) => Ok(CliAction::Replay {
                     mission_id: cmd.mission_id,
                     limit: cmd.limit,
-                    db_path: cmd.db_path,
                 }),
                 Command::Summary(cmd) => Ok(CliAction::Summary {
                     mission_id: cmd.mission_id,
-                    db_path: cmd.db_path,
                 }),
                 Command::Resume(cmd) => Ok(CliAction::Resume(ResumeConfig {
                     mission_id: cmd.mission_id,
-                    db_path: cmd.db_path,
                     state_dir: cmd.state_dir,
                     stall_seconds: cmd.options.stall_seconds,
                     watchdog_max_seconds: cmd.options.watchdog_max_seconds,
@@ -241,7 +227,6 @@ impl Cli {
                     mission_id: cmd.mission_id,
                     worker: cmd.worker,
                     limit: cmd.limit,
-                    db_path: cmd.db_path,
                 }),
             };
         }
@@ -285,7 +270,6 @@ impl Cli {
                 .get(),
             repo: repo.clone(),
             mission: mission.trim().to_owned(),
-            db_path: run.db_path,
             state_dir,
             dry_run: run.dry_run,
             stall_seconds: run.stall_seconds,
@@ -308,30 +292,28 @@ impl Cli {
 pub enum CliAction {
     Run(LaunchConfig),
     Status {
-        db_path: Option<PathBuf>,
         repo: PathBuf,
         state_dir: Option<PathBuf>,
     },
+    Push {
+        repo: PathBuf,
+    },
     Sessions {
-        db_path: Option<PathBuf>,
         repo: PathBuf,
         state_dir: Option<PathBuf>,
     },
     Replay {
         mission_id: Uuid,
         limit: usize,
-        db_path: Option<PathBuf>,
     },
     Summary {
         mission_id: Uuid,
-        db_path: Option<PathBuf>,
     },
     Resume(ResumeConfig),
     Watch {
         mission_id: Uuid,
         worker: String,
         limit: usize,
-        db_path: Option<PathBuf>,
     },
 }
 

@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+*.rs.bk
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Runtime state (local only)
+.sp/
+.hide.sp/
+sp-loc/
+
+# Documentation artifacts (generated)
+PROMPT-DUPLICATION-INVESTIGATION.md
+SQLITE-REPLACEMENT-PLAN.md
+qwen-live-runtime-fix-plan.md
+sapphire-tui.md
+IMPLEMENTATION-PLAN-GAS-TOWN-CAPABILITIES.md

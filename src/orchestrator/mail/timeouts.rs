@@ -34,15 +34,15 @@ pub fn recipient_timeout_prompt(
 ) -> String {
     match stage {
         1 => format!(
-            "You have an outstanding {} mail in thread {} from {}: '{}'. Reply now. Choose exactly one: 1. SAPPHIRE_ACK status=acked if you will handle it. 2. SAPPHIRE_ACK status=done if already completed. 3. SAPPHIRE_ACK status=cannot_comply with one concrete blocker.",
+            "Outstanding {} mail in thread {} from {}: '{}'. Reply now.\nSAPPHIRE_ACK statuses allowed: acked if you own it, done if finished, cannot_comply with one concrete blocker.\nIf partially blocked, send one narrow teammate reply and keep moving.",
             pending.message_type, pending.thread_id, sender_name, pending.subject
         ),
         2 => format!(
-            "Second coordination timeout for thread {}. Do not stay silent. Send SAPPHIRE_ACK with status=acked|done|cannot_comply immediately, then send SAPPHIRE_MAIL if the sender needs a concrete handoff, dependency answer, or blocker detail.",
+            "Second coordination timeout for thread {}. Stop staying silent. Send SAPPHIRE_ACK with status=acked|done|cannot_comply immediately, then one narrow reply with the answer, blocker, or reroute path.",
             pending.thread_id
         ),
         _ => format!(
-            "Final coordination timeout for thread {}. Respond now with SAPPHIRE_ACK status=done or cannot_comply. If you cannot comply, include the blocker in the summary so the team can reroute without waiting.",
+            "Final coordination timeout for thread {}. Respond now with SAPPHIRE_ACK status=done or cannot_comply. If cannot_comply, include the blocker and the best reroute path so the team can keep moving.",
             pending.thread_id
         ),
     }
@@ -55,15 +55,15 @@ pub fn sender_timeout_prompt(
 ) -> String {
     match stage {
         1 => format!(
-            "Your mail '{}' to {} in thread {} is still waiting on acknowledgment. Continue independent work. If the dependency becomes critical, prepare a narrower follow-up or alternate path.",
+            "Your mail '{}' to {} in thread {} is still waiting on acknowledgment. Keep moving on independent work. Prepare a narrower follow-up or alternate teammate path if it becomes critical.",
             pending.subject, recipient_name, pending.thread_id
         ),
         2 => format!(
-            "Your mail '{}' to {} in thread {} is still unanswered after a second timeout. Send a narrower follow-up only if needed. Otherwise keep moving on independent work and be ready to reroute the dependency.",
+            "Your mail '{}' to {} in thread {} is still unanswered after a second timeout. Narrow the ask or reroute through another teammate. Do not keep sending broad follow-ups.",
             pending.subject, recipient_name, pending.thread_id
         ),
         _ => format!(
-            "Coordination fails for '{}' with {} in thread {} after repeated timeouts. Keep moving on independent scope. Expect supervisor review or reroute the dependency through another teammate if possible.",
+            "Coordination failed for '{}' with {} in thread {} after repeated timeouts. Keep moving on independent scope. Try another teammate first, then supervisor if you need a ruling.",
             pending.subject, recipient_name, pending.thread_id
         ),
     }

@@ -11,11 +11,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::model::MailRecord;
+use crate::orchestrator::communication_policy;
 use crate::protocol::{AckDirective, MailDirective};
 use crate::store::Store;
 use crate::orchestrator::coordination;
 use crate::orchestrator::{ActiveSession, LeaseOwner};
 use super::types::*;
+use super::contract::validate_team_mail;
 use super::render::*;
 use super::nudge_queue::nudge_enqueue;
 use super::scavenge::{attempt_scavenge_claim, release_scavenge, ClaimResult};
@@ -201,6 +203,12 @@ pub fn handle_mail_directive(
     let Some(recipient_session) = active_sessions.get(&recipient_session_id) else {
         return Ok(MailHandlingResult { supervisor_notice: None });
     };
+    if let Some(error) = validate_team_mail(sender_session, recipient_session, &directive) {
+        if let Some(sender) = active_sessions.get(&sender_session_id) {
+            let _ = sender.runtime.send_prompt(&error);
+        }
+        return Ok(MailHandlingResult { supervisor_notice: None });
+    }
     let governance = coordination::govern_mail(
         sender_session,
         recipient_session,
@@ -306,13 +314,16 @@ pub fn handle_mail_directive(
             // Queue-based delivery — write to filesystem, drain at next turn boundary
             let nudge = nudge_from_mail(&directive, &sender_name);
             if let Err(e) = nudge_enqueue(state_dir, &recipient.record.id.to_string(), nudge) {
-                // Fallback to direct injection if queue fails
-                tracing::error!("nudge enqueue failed, falling back to direct injection: {e}");
-                let mail_prompt = render_mail_for_delivery(
-                    message_id, &thread_id, &sender_name, &directive,
-                    &cc_session_ids, ack_required, is_urgent,
-                );
-                let _ = recipient.runtime.send_prompt(&mail_prompt);
+                if communication_policy::MAIL_QUEUE_DIRECT_FALLBACK {
+                    tracing::error!("nudge enqueue failed, falling back to direct injection: {e}");
+                    let mail_prompt = render_mail_for_delivery(
+                        message_id, &thread_id, &sender_name, &directive,
+                        &cc_session_ids, ack_required, is_urgent,
+                    );
+                    let _ = recipient.runtime.send_prompt(&mail_prompt);
+                } else {
+                    tracing::error!("nudge enqueue failed; direct injection disabled by policy: {e}");
+                }
             }
         }
     }
@@ -321,7 +332,19 @@ pub fn handle_mail_directive(
     for cc_id in &cc_session_ids {
         if let Some(cc_session) = active_sessions.get(cc_id) {
             let cc_notice = render_cc_notice(&thread_id, &sender_name, &recipient_name, &directive);
-            let _ = cc_session.runtime.send_prompt(&cc_notice);
+            let now = chrono::Utc::now();
+            let _ = nudge_enqueue(
+                state_dir,
+                &cc_session.record.id.to_string(),
+                QueuedNudge {
+                    sender: "Sapphire".to_owned(),
+                    message: cc_notice,
+                    priority: "normal".to_owned(),
+                    thread_id: Some(thread_id.clone()),
+                    timestamp: now,
+                    expires_at: now + chrono::Duration::minutes(30),
+                },
+            );
         }
     }
 

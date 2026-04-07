@@ -60,6 +60,17 @@ impl MissionStatus {
             Self::Failed => "failed",
         }
     }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_lowercase().as_str() {
+            "planned" => Ok(Self::Planned),
+            "launching" => Ok(Self::Launching),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(format!("unknown mission status: {}", s)),
+        }
+    }
 }
 
 /// Supervisor-generated mission plan. Contains workstream decomposition, risk map, and worker assignments.
@@ -289,6 +300,7 @@ impl SessionState {
 /// Runtime event record — every output chunk, directive, state change,
 /// automation event, stall, mail, lease, or validation result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct EventRecord {
     /// Unique event identifier (UUID v4)
     pub id: Uuid,
@@ -413,7 +425,6 @@ pub struct LaunchSummary {
     pub mission_id: Uuid,
     pub repo: PathBuf,
     pub state_dir: PathBuf,
-    pub db_path: PathBuf,
     pub dry_run: bool,
     pub worker_agent: AgentKind,
     pub supervisor_agent: AgentKind,
@@ -474,6 +485,7 @@ pub struct ValidationResultRecord {
 /// Session restart tracking record (from gastown daemon restart tracker pattern).
 /// Persists restart attempts to survive orchestrator restarts and detect crash loops.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RestartRecord {
     /// Unique restart record identifier (UUID v4)
     pub id: Uuid,
@@ -539,7 +551,6 @@ impl LaunchSummary {
         lines.push(format!("mission_id: {}", self.mission_id));
         lines.push(format!("repo: {}", self.repo.display()));
         lines.push(format!("state_dir: {}", self.state_dir.display()));
-        lines.push(format!("db_path: {}", self.db_path.display()));
         lines.push(format!(
             "agents: workers={} x{} | supervisor={}",
             self.worker_agent.as_str(),

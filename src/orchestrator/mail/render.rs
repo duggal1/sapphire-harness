@@ -21,13 +21,9 @@ pub fn render_mail_for_delivery(
 
     let header = match normalized {
         "task" => format!(
-            "[SAPPHIRE TASK — ACTION REQUIRED]\n\
-             FROM: {sender}\nTO: {to}\n\
-             THREAD: {thread}\nPRIORITY: {priority}\n\n\
-             SUBJECT: {subject}\n\n\
-             CONTEXT:\n{context}\n\n\
-             REQUEST:\n{request}\n\n\
-             EXPECTED ACTION:\n{expected}",
+            "[SAPPHIRE TASK]\n\
+             FROM: {sender}\nTO: {to}\nTHREAD: {thread}\nPRIORITY: {priority}\n\
+             SUBJECT: {subject}\nCONTEXT: {context}\nASK: {request}\nDONE WHEN: {expected}",
             sender = sender_name,
             to = directive.to,
             thread = thread_id,
@@ -38,13 +34,9 @@ pub fn render_mail_for_delivery(
             expected = directive.expected_action,
         ),
         "escalation" => format!(
-            "⚠ [SAPPHIRE ESCALATION — BLOCKER]\n\
-             FROM: {sender}\nTO: {to}\n\
-             THREAD: {thread}\nPRIORITY: {priority}\n\n\
-             SUBJECT: {subject}\n\n\
-             CONTEXT:\n{context}\n\n\
-             BLOCKER:\n{request}\n\n\
-             ESCALATION REQUEST:\n{expected}",
+            "[SAPPHIRE ESCALATION]\n\
+             FROM: {sender}\nTO: {to}\nTHREAD: {thread}\nPRIORITY: {priority}\n\
+             SUBJECT: {subject}\nFAILED COORDINATION: {context}\nBLOCKER: {request}\nRULING NEEDED: {expected}",
             sender = sender_name,
             to = directive.to,
             thread = thread_id,
@@ -55,13 +47,10 @@ pub fn render_mail_for_delivery(
             expected = directive.expected_action,
         ),
         "scavenge" => format!(
-            "[SAPPHIRE WORK AVAILABLE — FIRST TO CLAIM]\n\
-             FROM: {sender}\nTO: {to}\n\
-             THREAD: {thread}\n\n\
-             SUBJECT: {subject}\n\n\
-             CONTEXT:\n{context}\n\n\
-             AVAILABLE WORK:\n{request}\n\n\
-             To claim this work, acknowledge and take ownership.",
+            "[SAPPHIRE SCAVENGE]\n\
+             FROM: {sender}\nTO: {to}\nTHREAD: {thread}\n\
+             SUBJECT: {subject}\nCONTEXT: {context}\nAVAILABLE WORK: {request}\n\
+             CLAIM ONLY IF YOU CAN OWN IT NOW.",
             sender = sender_name,
             to = directive.to,
             thread = thread_id,
@@ -71,20 +60,15 @@ pub fn render_mail_for_delivery(
         ),
         "reply" => format!(
             "[SAPPHIRE REPLY]\n\
-             FROM: {sender}\nTHREAD: {thread}\n\n\
-             SUBJECT: Re: {subject}\n\n\
-             {context}",
+             FROM: {sender}\nTHREAD: {thread}\nSUBJECT: Re: {subject}\nANSWER: {body}",
             sender = sender_name,
             thread = thread_id,
             subject = directive.subject,
-            context = if directive.request.is_empty() { &directive.context } else { &directive.request },
+            body = if directive.request.is_empty() { &directive.context } else { &directive.request },
         ),
         _ => format!(
             "[SAPPHIRE NOTICE]\n\
-             FROM: {sender}\nTO: {to}\n\
-             THREAD: {thread}\n\n\
-             SUBJECT: {subject}\n\n\
-             {body}",
+             FROM: {sender}\nTO: {to}\nTHREAD: {thread}\nSUBJECT: {subject}\nBODY: {body}",
             sender = sender_name,
             to = directive.to,
             thread = thread_id,
@@ -102,19 +86,21 @@ pub fn render_mail_for_delivery(
     let ack_instruction = if requires_ack {
         if is_urgent {
             format!(
-                "\n⚡ URGENT: Acknowledge IMMEDIATELY with:\n\
-                 SAPPHIRE_ACK {{\"mail_id\":\"{}\",\"status\":\"acked\",\"summary\":\"acknowledged\"}}",
+                "\nACK NOW:\n\
+                 SAPPHIRE_ACK {{\"mail_id\":\"{}\",\"status\":\"acked\",\"summary\":\"acknowledged\"}}\n\
+                 Then do one of two things only: finish the ask, or reply with one blocker and keep moving on independent work.",
                 message_id
             )
         } else {
             format!(
-                "\nAcknowledge with:\n\
-                 SAPPHIRE_ACK {{\"mail_id\":\"{}\",\"status\":\"acked\",\"summary\":\"one short sentence\"}}",
+                "\nACK NOW:\n\
+                 SAPPHIRE_ACK {{\"mail_id\":\"{}\",\"status\":\"acked\",\"summary\":\"one short sentence\"}}\n\
+                 If you are partially blocked, send one narrow reply and continue independent work. Do not freeze.",
                 message_id
             )
         }
     } else {
-        "\nNo ack required. Respond via SAPPHIRE_MAIL or SAPPHIRE_STATUS when your state changes.".to_owned()
+        "\nNo ack required. Reply only if your coordination state materially changes.".to_owned()
     };
 
     format!("{header}{cc_line}{ack_instruction}")
@@ -131,11 +117,8 @@ pub fn render_cc_notice(
 ) -> String {
     format!(
         "[SAPPHIRE CC NOTICE]\n\
-         You are CC'd on mail thread: {thread}\n\
-         FROM: {from}\nTO: {to}\n\
-         SUBJECT: {subject}\n\
-         TYPE: {msg_type}\n\n\
-         No action required. Monitor thread for context.",
+         THREAD: {thread}\nFROM: {from}\nTO: {to}\nSUBJECT: {subject}\nTYPE: {msg_type}\n\
+         No action required. Monitor only.",
         thread = thread_id,
         from = sender_name,
         to = recipient_name,

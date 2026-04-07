@@ -4,6 +4,7 @@
 //! and engineering-semantic rendering. Extracted from mod.rs for modularity.
 
 mod types;
+mod contract;
 mod render;
 mod nudge_queue;
 mod scavenge;
@@ -29,6 +30,9 @@ pub use types::{
     QueuedNudge,
     nudge_from_mail,
 };
+
+#[allow(unused_imports)]
+pub use contract::validate_team_mail;
 
 #[allow(unused_imports)]
 pub use render::{

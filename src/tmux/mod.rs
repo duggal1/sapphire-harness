@@ -9,6 +9,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use parking_lot::Mutex;
+
+/// Global mutex for tmux buffer operations (load-buffer / paste-buffer / delete-buffer).
+/// The tmux buffer namespace is **global per server**, not per-pane. Without this mutex,
+/// concurrent paste operations from different workers can interleave at the tmux server level,
+/// causing prompt duplication or garbled text.
+static TMUX_BUFFER_MUTEX: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneState {
     pub dead: bool,
@@ -126,14 +134,20 @@ impl Tmux {
             let batch_size = end - start;
             let session = format!("{base_name}-{tab_num}");
 
-            // Compute grid: side-by-side columns first, then rows
-            // 2 workers → 1×2 (side by side)  3-4 → 2×2  5-8 → 2×4
-            let cols = if batch_size <= 2 { batch_size } else if batch_size <= 4 { 2 } else if batch_size <= 8 { 4 } else { 4 };
+            // Match the proven launch-supervisor-grid.sh geometry so interactive
+            // terminals boot with enough vertical room before a GUI client attaches.
+            let cols = if batch_size <= 2 {
+                batch_size
+            } else if batch_size <= 4 {
+                2
+            } else if batch_size <= 8 {
+                4
+            } else {
+                4
+            };
             let rows = (batch_size + cols - 1) / cols;
-            // Bias the session toward a wide canvas so tmux tiling prefers
-            // left-to-right readability over stacked narrow panes.
-            let win_w = (cols * 72).max(280);
-            let win_h = (rows * 18).max(36);
+            let win_w = (cols * 55).max(200);
+            let win_h = (rows * 22).max(40);
 
             self.create_session_for_workers(&session, work_dir, win_w, win_h)?;
 
@@ -232,6 +246,10 @@ impl Tmux {
         if text.is_empty() {
             return Ok(());
         }
+
+        // Serialize all tmux buffer operations to prevent concurrent pastes
+        // from interleaving at the tmux server level.
+        let _guard = TMUX_BUFFER_MUTEX.lock();
 
         let buffer_name = format!(
             "sapphire_{}_{}",
@@ -430,12 +448,8 @@ impl Tmux {
         for line in &script {
             command.arg("-e").arg(line);
         }
-        let status = command.status().map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("Ghostty tab automation failed with status {status}"))
-        }
+        command.spawn().map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Open a new Ghostty window running a specific tmux session (proven AppleScript approach).
@@ -458,16 +472,17 @@ impl Tmux {
         for line in &script {
             command.arg("-e").arg(line);
         }
-        let status = command.status().map_err(|e| e.to_string())?;
-        if status.success() {
-            tracing::info!(
-                "opened Ghostty window for tmux session '{}' via AppleScript",
-                session
-            );
-            Ok(())
-        } else {
-            // Fallback: open -na approach
-            self.open_ghostty_window_fallback(session)
+        match command.spawn() {
+            Ok(_) => {
+                tracing::info!(
+                    "requested Ghostty window for tmux session '{}' via AppleScript",
+                    session
+                );
+                Ok(())
+            }
+            Err(error) => self.open_ghostty_window_fallback(session).map_err(|fallback_error| {
+                format!("{error}; fallback failed: {fallback_error}")
+            }),
         }
     }
 
@@ -499,18 +514,12 @@ impl Tmux {
         for line in &script {
             command.arg("-e").arg(line);
         }
-        let status = command.status().map_err(|e| e.to_string())?;
-        if status.success() {
-            tracing::info!(
-                "opened Ghostty tab for tmux session '{}' via AppleScript",
-                session
-            );
-            Ok(())
-        } else {
-            Err(format!(
-                "Ghostty tab AppleScript failed with status {status}"
-            ))
-        }
+        command.spawn().map_err(|e| e.to_string())?;
+        tracing::info!(
+            "requested Ghostty tab for tmux session '{}' via AppleScript",
+            session
+        );
+        Ok(())
     }
 
     /// Open Ghostty tabs for multiple tmux sessions (from launch-codex-tabs.sh pattern).
@@ -528,7 +537,7 @@ impl Tmux {
                 e
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::thread::sleep(std::time::Duration::from_millis(250));
 
         // Subsequent sessions: open tabs
         for session in session_names.iter().skip(1) {
@@ -543,7 +552,7 @@ impl Tmux {
                     tracing::warn!("fallback also failed for session '{}': {}", session, e);
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(1000));
+            std::thread::sleep(std::time::Duration::from_millis(120));
         }
 
         Ok(())
@@ -555,7 +564,7 @@ impl Tmux {
         let ghostty_app = ghostty_app_path()
             .ok_or_else(|| "Ghostty.app was not found in /Applications".to_owned())?;
         let attach_cmd = format!("tmux attach-session -t {}", shell_quote(session));
-        let status = Command::new("open")
+        Command::new("open")
             .args([
                 "-na",
                 &ghostty_app,
@@ -565,20 +574,13 @@ impl Tmux {
                 "-lc",
                 &attach_cmd,
             ])
-            .status()
+            .spawn()
             .map_err(|e| e.to_string())?;
-        if status.success() {
-            tracing::info!(
-                "opened Ghostty window for tmux session '{}' (fallback)",
-                session
-            );
-            Ok(())
-        } else {
-            Err(format!(
-                "failed to open Ghostty window for tmux session {} (open exited with {})",
-                session, status
-            ))
-        }
+        tracing::info!(
+            "requested Ghostty window for tmux session '{}' (fallback)",
+            session
+        );
+        Ok(())
     }
 
     pub fn is_available() -> bool {

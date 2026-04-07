@@ -2,11 +2,15 @@ use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
+use anyhow::Result;
+use serde_json::json;
+
 use crate::protocol::StatusDirective;
 
 pub struct StatusFileUpdate {
     pub modified_at: SystemTime,
     pub directive: StatusDirective,
+    pub bootstrap: bool,
 }
 
 pub fn load_status_file_update(
@@ -42,6 +46,10 @@ pub fn load_status_file_update(
         .get("overlap")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
+    let bootstrap = status_obj
+        .get("bootstrap")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
 
     Some(StatusFileUpdate {
         modified_at,
@@ -53,7 +61,36 @@ pub fn load_status_file_update(
             risks,
             overlap,
         },
+        bootstrap,
     })
+}
+
+pub fn write_bootstrap_status_files(
+    primary_path: &Path,
+    hidden_path: &Path,
+    summary: &str,
+) -> Result<()> {
+    let payload = json!({
+        "state": "progressing",
+        "summary": summary,
+        "files": [],
+        "commands": [],
+        "risks": [],
+        "overlap": "none",
+        "bootstrap": true,
+    });
+    let content = serde_json::to_string(&payload)?;
+    write_status_file(primary_path, &content)?;
+    write_status_file(hidden_path, &content)?;
+    Ok(())
+}
+
+fn write_status_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(())
 }
 
 fn collect_string_array(value: Option<&serde_json::Value>) -> Vec<String> {

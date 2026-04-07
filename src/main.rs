@@ -8,7 +8,9 @@ mod model;
 mod orchestrator;
 mod protocol;
 mod runtime;
-mod store;
+#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
+mod storage;
+mod store; // Deprecated — backward compat alias, will be removed
 mod templates;
 mod terminal_palette;
 mod tmux;
@@ -63,9 +65,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            let db_path = config.db_path.clone().unwrap_or_else(|| {
-                config.state_dir.clone().join("sapphire.sqlite3")
-            });
+            let state_path = config.state_dir.clone();
             let control_status = config.state_dir.join("control/status.txt");
             let use_teamwork =
                 config.tmux && tui::run_enabled_for_launch(config.dry_run) && tmux::Tmux::is_available();
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
                 });
                 let attach = tui::attach_for_repo(config.repo.clone(), chrono::Utc::now());
                 let tmux_ready = tui::run_startup_dashboard_until_tmux(
-                    db_path.clone(),
+                    state_path.clone(),
                     control_status.clone(),
                     attach.clone(),
                     &session_name,
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
                 // Do NOT open it here — that would create a duplicate window.
                 let _ = tmux_ready;
                 let summary =
-                    tui::run_launch_dashboard(db_path, control_status, attach, task).await?;
+                    tui::run_launch_dashboard(state_path, control_status, attach, task).await?;
                 println!("{}", summary.render());
             } else if use_tui && !config.dry_run {
                 let config_clone = config.clone();
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
                     orchestrator.launch(config_clone).await
                 });
                 let attach = tui::attach_for_repo(config.repo.clone(), chrono::Utc::now());
-                let summary = tui::run_launch_dashboard(db_path, control_status, attach, task).await?;
+                let summary = tui::run_launch_dashboard(state_path, control_status, attach, task).await?;
                 println!("{}", summary.render());
             } else {
                 let orchestrator = Orchestrator::bootstrap(&config)?;
@@ -112,44 +112,30 @@ async fn main() -> Result<()> {
             }
         }
         CliAction::Status {
-            db_path,
             repo,
             state_dir,
         } => {
-            let db_path = db_path.unwrap_or_else(|| {
-                state_dir
-                    .unwrap_or_else(|| repo.join(".sp"))
-                    .join("sapphire.sqlite3")
-            });
-            let orchestrator = Orchestrator::open(&db_path)?;
+            let state_dir = state_dir.unwrap_or_else(|| repo.join(".sp"));
+            let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_status()?);
         }
+        CliAction::Push { repo } => {
+            git::push_current_branch(&repo)?;
+        }
         CliAction::Sessions {
-            db_path,
             repo,
             state_dir,
         } => {
-            let db_path = db_path.unwrap_or_else(|| {
-                state_dir
-                    .unwrap_or_else(|| repo.join(".sp"))
-                    .join("sapphire.sqlite3")
-            });
-            let orchestrator = Orchestrator::open(&db_path)?;
+            let state_dir = state_dir.unwrap_or_else(|| repo.join(".sp"));
+            let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_sessions()?);
         }
         CliAction::Resume(config) => {
-            let db_path = config.db_path.clone().unwrap_or_else(|| {
-                config
-                    .state_dir
-                    .clone()
-                    .unwrap_or_else(|| std::env::current_dir().expect("cwd").join(".sp"))
-                    .join("sapphire.sqlite3")
-            });
-            let control_status = config
+            let state_dir = config
                 .state_dir
                 .clone()
-                .unwrap_or_else(|| std::env::current_dir().expect("cwd").join(".sp"))
-                .join("control/status.txt");
+                .unwrap_or_else(|| std::env::current_dir().expect("cwd").join(".sp"));
+            let control_status = state_dir.join("control/status.txt");
             let use_teamwork =
                 config.tmux && tmux::Tmux::is_available() && tui::run_enabled_for_launch(false);
             if use_teamwork {
@@ -158,24 +144,14 @@ async fn main() -> Result<()> {
                     .clone()
                     .expect("teamwork surface session name is always set");
                 let config_clone = config.clone();
+                let state_dir_clone = state_dir.clone();
                 let task = tokio::spawn(async move {
-                    let orchestrator = Orchestrator::open(
-                        &config_clone
-                            .db_path
-                            .clone()
-                            .unwrap_or_else(|| {
-                                config_clone
-                                    .state_dir
-                                    .clone()
-                                    .unwrap_or_else(|| std::env::current_dir().expect("cwd").join(".sp"))
-                                    .join("sapphire.sqlite3")
-                            }),
-                    )?;
+                    let orchestrator = Orchestrator::open(&state_dir_clone)?;
                     orchestrator.resume(config_clone).await
                 });
                 let attach = tui::attach_for_mission(config.mission_id);
                 let tmux_ready = tui::run_startup_dashboard_until_tmux(
-                    db_path.clone(),
+                    state_dir.clone(),
                     control_status.clone(),
                     attach.clone(),
                     &session_name,
@@ -185,7 +161,7 @@ async fn main() -> Result<()> {
                 // External terminal is opened by the orchestrator inside run_live_mission.
                 let _ = tmux_ready;
                 let summary = tui::run_launch_dashboard(
-                    db_path.clone(),
+                    state_dir,
                     control_status,
                     attach,
                     task,
@@ -193,7 +169,7 @@ async fn main() -> Result<()> {
                 .await?;
                 println!("{}", summary.render());
             } else {
-                let orchestrator = Orchestrator::open(&db_path)?;
+                let orchestrator = Orchestrator::open(&state_dir)?;
                 let summary = orchestrator.resume(config).await?;
                 println!("{}", summary.render());
             }
@@ -201,40 +177,31 @@ async fn main() -> Result<()> {
         CliAction::Replay {
             mission_id,
             limit,
-            db_path,
         } => {
-            let db_path = db_path.unwrap_or_else(|| {
-                std::env::current_dir()
-                    .expect("cwd")
-                    .join(".sp/sapphire.sqlite3")
-            });
-            let orchestrator = Orchestrator::open(&db_path)?;
+            let state_dir = std::env::current_dir()
+                .expect("cwd")
+                .join(".sp");
+            let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_replay(mission_id, limit)?);
         }
         CliAction::Summary {
             mission_id,
-            db_path,
         } => {
-            let db_path = db_path.unwrap_or_else(|| {
-                std::env::current_dir()
-                    .expect("cwd")
-                    .join(".sp/sapphire.sqlite3")
-            });
-            let orchestrator = Orchestrator::open(&db_path)?;
+            let state_dir = std::env::current_dir()
+                .expect("cwd")
+                .join(".sp");
+            let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_supervisor_summary(mission_id)?);
         }
         CliAction::Watch {
             mission_id,
             worker,
             limit,
-            db_path,
         } => {
-            let db_path = db_path.unwrap_or_else(|| {
-                std::env::current_dir()
-                    .expect("cwd")
-                    .join(".sp/sapphire.sqlite3")
-            });
-            let orchestrator = Orchestrator::open(&db_path)?;
+            let state_dir = std::env::current_dir()
+                .expect("cwd")
+                .join(".sp");
+            let orchestrator = Orchestrator::open(&state_dir)?;
             println!(
                 "{}",
                 orchestrator.render_worker_replay(mission_id, &worker, limit)?

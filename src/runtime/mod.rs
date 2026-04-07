@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::tmux::{PaneState, Tmux};
@@ -257,37 +258,38 @@ impl TmuxBackend {
         let command = render_tmux_command(&spec)?;
 
         // Reuse an existing pane if available, otherwise split a new one
-        let pane_id = {
+        let (pane_id, created_new_pane) = {
             let mut spawned = self.spawned_panes.lock();
             let pane_id = {
                 let pane_ids = self.tmux.list_pane_ids(&self.session_name);
                 if *spawned < pane_ids.len() {
-                    pane_ids[*spawned].clone()
+                    (pane_ids[*spawned].clone(), false)
                 } else {
-                    self.tmux
-                        .split_window_with_command(
-                            &self.session_name,
-                            *spawned % 2 == 0,
-                            &spec.cwd.to_string_lossy(),
-                            &command,
-                        )
-                        .map_err(anyhow::Error::msg)?
+                    (
+                        self.tmux
+                            .split_window(
+                                &self.session_name,
+                                &self.session_name,
+                                *spawned % 2 == 0,
+                            )
+                            .map_err(anyhow::Error::msg)?,
+                        true,
+                    )
                 }
             };
             *spawned += 1;
             pane_id
         };
 
-        // Send the agent command to the pane
         let _ = self.tmux.set_pane_title(&pane_id, &spec.surface_label);
-        let _ = self.tmux.send_command(&pane_id, &command);
-        // Small delay to ensure command starts before piping
-        std::thread::sleep(std::time::Duration::from_millis(300));
         let _ = self.tmux.pipe_pane(
             &pane_id,
             &format!("cat >> {}", shell_quote(&transcript_path.to_string_lossy())),
         );
-        let _ = self.tmux.select_layout(&self.session_name, "tiled");
+        let _ = self.tmux.send_command(&pane_id, &command);
+        if created_new_pane {
+            let _ = self.tmux.select_layout(&self.session_name, "tiled");
+        }
 
         // Auto-respawn hook (from gastown PATCH-010 pattern):
         // When the agent process exits, tmux auto-respawns it — instant recovery
@@ -308,8 +310,17 @@ impl TmuxBackend {
 
         if let Some((delay, text)) = startup_input {
             let startup_handle = Arc::clone(&handle);
+            let label = handle.display_name.to_string();
+            let pane = handle.pane_id.clone();
             thread::spawn(move || {
                 thread::sleep(delay);
+                info!(
+                    worker = %label,
+                    pane = %pane,
+                    delay_ms = delay.as_millis(),
+                    "startup_input firing: {preview}",
+                    preview = text_preview(&text)
+                );
                 let _ = startup_handle.send_prompt(&text);
             });
         }
@@ -379,6 +390,13 @@ impl SessionHandle for TmuxSessionHandle {
     }
 
     fn send_text(&self, text: &str) -> Result<()> {
+        info!(
+            pane = %self.pane_id,
+            worker = %self.display_name,
+            bytes = text.len(),
+            "send_text (tmux): {preview}",
+            preview = text_preview(text)
+        );
         self.tmux
             .paste_text_via_buffer(&self.pane_id, text)
             .map_err(anyhow::Error::msg)
@@ -386,6 +404,14 @@ impl SessionHandle for TmuxSessionHandle {
 
     fn send_prompt(&self, text: &str) -> Result<()> {
         let body = text.trim_end_matches(['\r', '\n']);
+        info!(
+            pane = %self.pane_id,
+            worker = %self.display_name,
+            bytes = body.len(),
+            submit_mode = ?self.submit_mode,
+            "send_prompt (tmux): {preview}",
+            preview = text_preview(body)
+        );
         if !body.is_empty() {
             self.tmux
                 .paste_text_via_buffer(&self.pane_id, body)
@@ -425,6 +451,13 @@ impl SessionHandle for PtySessionHandle {
     }
 
     fn send_text(&self, text: &str) -> Result<()> {
+        info!(
+            session = %self.session_id,
+            worker = %self.display_name,
+            bytes = text.len(),
+            "send_text (pty): {preview}",
+            preview = text_preview(text)
+        );
         let mut writer = self.writer.lock();
         writer
             .write_all(text.as_bytes())
@@ -434,6 +467,14 @@ impl SessionHandle for PtySessionHandle {
     }
 
     fn send_prompt(&self, text: &str) -> Result<()> {
+        info!(
+            session = %self.session_id,
+            worker = %self.display_name,
+            bytes = text.len(),
+            submit_mode = ?self.submit_mode,
+            "send_prompt (pty): {preview}",
+            preview = text_preview(text)
+        );
         let mut writer = self.writer.lock();
         write_terminal_submission(&mut *writer, self.submit_mode, text)
             .with_context(|| format!("failed to submit prompt to session {}", self.session_id))
@@ -669,7 +710,12 @@ fn render_tmux_command(spec: &ProcessLaunchSpec) -> Result<String> {
     } else {
         format!("env {} {}", env_prefix.join(" "), command)
     };
-    Ok(format!("/bin/zsh -lc {}", shell_quote(&full)))
+    let wrapped = format!(
+        "cd {} && {}",
+        shell_quote(&spec.cwd.to_string_lossy()),
+        full
+    );
+    Ok(format!("/bin/zsh -lc {}", shell_quote(&wrapped)))
 }
 
 fn spawn_tmux_monitor(
@@ -760,6 +806,23 @@ fn sanitize_file_stem(text: &str) -> String {
 
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+/// Truncate text to a short preview for logging.
+fn text_preview(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let limit = std::cmp::min(200, bytes.len());
+    // Ensure we don't split a UTF-8 character boundary
+    let preview = std::str::from_utf8(&bytes[..limit]).unwrap_or("invalid utf8");
+    let escaped = preview
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    if limit < bytes.len() {
+        format!("{escaped}… (+{} more bytes)", bytes.len() - limit)
+    } else {
+        escaped
+    }
 }
 
 #[cfg(test)]
