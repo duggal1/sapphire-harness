@@ -4,20 +4,105 @@
 
 set -e
 
-# ── Color helpers ──────────────────────────────────────────────
-BOLD=$(tput bold 2>/dev/null || echo "")
-DIM=$(tput dim 2>/dev/null || echo "")
-GREEN=$(tput setaf 2 2>/dev/null || echo "")
-CYAN=$(tput setaf 6 2>/dev/null || echo "")
-PURPLE=$(tput setaf 5 2>/dev/null || echo "")
-YELLOW=$(tput setaf 3 2>/dev/null || echo "")
-RED=$(tput setaf 1 2>/dev/null || echo "")
-RESET=$(tput sgr0 2>/dev/null || echo "")
+# ── Visual helpers ─────────────────────────────────────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    RESET=$'\033[0m'
+    FG=$'\033[38;2;244;241;255m'
+    MUTED=$'\033[38;2;156;149;179m'
+    BORDER=$'\033[38;2;86;79;111m'
+    PURPLE=$'\033[38;2;191;104;255m'
+    PURPLE_BRIGHT=$'\033[38;2;234;213;255m'
+    GREEN=$'\033[38;2;122;230;156m'
+    TEAL=$'\033[38;2;133;226;239m'
+    YELLOW=$'\033[38;2;244;189;102m'
+    RED=$'\033[38;2;255;136;170m'
+else
+    BOLD=""
+    DIM=""
+    RESET=""
+    FG=""
+    MUTED=""
+    BORDER=""
+    PURPLE=""
+    PURPLE_BRIGHT=""
+    GREEN=""
+    TEAL=""
+    YELLOW=""
+    RED=""
+fi
 
-check()  { printf "${GREEN}✔${RESET} %s\n" "$1"; }
-info()   { printf "${DIM}→${RESET} %s\n" "$1"; }
-warn()   { printf "${YELLOW}⚠${RESET} %s\n" "$1"; }
-err()    { printf "${RED}✕${RESET} %s\n" "$1" >&2; }
+BOX_WIDTH=68
+
+check() { printf " ${GREEN}✓${RESET} %b\n" "$1"; }
+info() { printf " ${PURPLE}›${RESET} ${MUTED}%b${RESET}\n" "$1"; }
+warn() { printf " ${YELLOW}!${RESET} %b\n" "$1"; }
+err() { printf " ${RED}✕${RESET} %b\n" "$1" >&2; }
+
+repeat_char() {
+    local char="$1"
+    local count="$2"
+    local out=""
+
+    while [ "$count" -gt 0 ]; do
+        out="${out}${char}"
+        count=$((count - 1))
+    done
+
+    printf "%s" "$out"
+}
+
+fit_text() {
+    local text="$1"
+    local width="$2"
+
+    if [ "${#text}" -le "$width" ]; then
+        printf "%s" "$text"
+    else
+        printf "%s" "${text:0:$((width - 3))}..."
+    fi
+}
+
+print_box_border() {
+    printf "${BORDER}┌"
+    repeat_char "─" $((BOX_WIDTH + 2))
+    printf "┐${RESET}\n"
+}
+
+print_box_footer() {
+    printf "${BORDER}└"
+    repeat_char "─" $((BOX_WIDTH + 2))
+    printf "┘${RESET}\n"
+}
+
+print_box_line() {
+    local text
+    text=$(fit_text "$1" "$BOX_WIDTH")
+    printf "${BORDER}│ ${FG}%-*s${RESET} ${BORDER}│${RESET}\n" "$BOX_WIDTH" "$text"
+}
+
+print_centered_box_line() {
+    local text="$1"
+    local style_prefix="$2"
+    local text_width=${#text}
+    local left_pad=0
+    local right_pad=0
+
+    if [ "$text_width" -lt "$BOX_WIDTH" ]; then
+        left_pad=$(((BOX_WIDTH - text_width) / 2))
+        right_pad=$((BOX_WIDTH - text_width - left_pad))
+    fi
+
+    printf "${BORDER}│ %*s%b%s%b%*s ${BORDER}│${RESET}\n" \
+        "$left_pad" "" \
+        "$style_prefix" "$text" "$RESET" \
+        "$right_pad" ""
+}
+
+print_empty_box_line() {
+    printf "${BORDER}│ %-*s │${RESET}\n" "$BOX_WIDTH" ""
+}
 
 # ── Config ─────────────────────────────────────────────────────
 REPO="sapphire-harness"
@@ -28,36 +113,26 @@ VERSION="${SP_VERSION:-latest}"
 
 # ── Banner ────────────────────────────────────────────────────
 print_banner() {
-    local border_color="${PURPLE}"
-    local title_color="${CYAN}"
-    local width=60
-
     printf "\n"
-    printf "${border_color}┌"; printf '─%.0s' $(seq 1 $width); printf "┐${RESET}\n"
-    printf "${border_color}│${RESET}"
-    printf "%${width}s" "" | tr ' ' ' '
-    printf "${border_color}│${RESET}\n"
+    print_box_border
+    print_empty_box_line
+    print_centered_box_line "Sapphire Agent Factory" "${PURPLE_BRIGHT}${BOLD}"
+    print_centered_box_line "Terminal-first multi-agent orchestration CLI" "${MUTED}"
+    print_empty_box_line
+    print_box_footer
+    printf "\n"
+}
 
-    local line1="✨ Sapphire Agent Factory"
-    local line2="Terminal-first multi-agent orchestration CLI"
-    local pad1=$(( (width - ${#line1}) / 2 ))
-    local pad2=$(( (width - ${#line2}) / 2 ))
-
-    printf "${border_color}│${RESET}"
-    printf "%${pad1}s${title_color}${BOLD}%s${RESET}" "" "$line1"
-    printf "%$((width - pad1 - ${#line1}))s" ""
-    printf "${border_color}│${RESET}\n"
-
-    printf "${border_color}│${RESET}"
-    printf "%${pad2}s${DIM}%s${RESET}" "" "$line2"
-    printf "%$((width - pad2 - ${#line2}))s" ""
-    printf "${border_color}│${RESET}\n"
-
-    printf "${border_color}│${RESET}"
-    printf "%${width}s" "" | tr ' ' ' '
-    printf "${border_color}│${RESET}\n"
-
-    printf "${border_color}└"; printf '─%.0s' $(seq 1 $width); printf "┘${RESET}\n"
+print_capabilities() {
+    print_box_border
+    printf "${BORDER}│ ${PURPLE_BRIGHT}${BOLD}%-*s${RESET} ${BORDER}│${RESET}\n" "$BOX_WIDTH" "Capabilities"
+    print_empty_box_line
+    print_box_line "• Plans missions before execution"
+    print_box_line "• Runs supervisor and worker terminals in parallel"
+    print_box_line "• Preserves mail, replay, status, and mission state locally"
+    print_box_line "• Keeps validation, watchdog, and recovery loops active"
+    print_box_line "• Supports tmux teamwork surfaces for live coordination"
+    print_box_footer
     printf "\n"
 }
 
@@ -78,9 +153,9 @@ detect_platform() {
         *)            err "Unsupported architecture: $arch"; exit 1 ;;
     esac
 
-    printf "\n"
-    check "Detected: ${BOLD}${os}${RESET} (${BOLD}${arch}${RESET})"
-    echo "${arch}-${os}"
+    printf "\n" >&2
+    check "Detected: ${BOLD}${os}${RESET} (${BOLD}${arch}${RESET})" >&2
+    printf "%s" "${arch}-${os}"
 }
 
 # ── Prerequisites ──────────────────────────────────────────────
@@ -176,17 +251,22 @@ check_path() {
 # ── Quick start ────────────────────────────────────────────────
 print_quickstart() {
     printf "\n"
-    printf "  ${CYAN}Quick start:${RESET}\n\n"
-    printf "    ${BOLD}sp qwen 2 --repo . --mission \"debug and validate the repo\"${RESET}\n"
-    printf "    ${BOLD}sp status${RESET}\n"
-    printf "    ${BOLD}sp --help${RESET}\n\n"
-    printf "  ${DIM}Docs: https://github.com/${GITHUB_USER}/${REPO}${RESET}\n"
+    print_box_border
+    printf "${BORDER}│ ${PURPLE_BRIGHT}${BOLD}%-*s${RESET} ${BORDER}│${RESET}\n" "$BOX_WIDTH" "Quick start"
+    print_empty_box_line
+    print_box_line "sp qwen 2 --repo . --mission \"debug and validate the repo\""
+    print_box_line "sp status"
+    print_box_line "sp --help"
+    print_empty_box_line
+    print_box_line "Docs: https://github.com/${GITHUB_USER}/${REPO}"
+    print_box_footer
     printf "\n"
 }
 
 # ── Main ───────────────────────────────────────────────────────
 main() {
     print_banner
+    print_capabilities
     check_prereqs
     local platform
     platform=$(detect_platform)

@@ -13,11 +13,10 @@ use std::time::Instant;
 use crate::internal::ui::shimmer::current_spinner_frame;
 use crate::internal::ui::theme::unicode::Symbol;
 
-const TIMER_COLOR: Color = Color::Rgb(206, 165, 255);
 const WARNING_ORANGE: Color = Color::Rgb(255, 138, 169);
-const SHIMMER_BASE: Color = Color::Rgb(191, 219, 254);
-const SHIMMER_HOT: Color = Color::Rgb(239, 246, 255);
-const SHIMMER_MID: Color = Color::Rgb(219, 234, 254);
+const SHIMMER_IDLE_RGB: (u8, u8, u8) = (156, 143, 187);
+const SHIMMER_BASE_RGB: (u8, u8, u8) = (193, 136, 255);
+const SHIMMER_HOT_RGB: (u8, u8, u8) = (245, 233, 255);
 
 // One static instant for smooth time-based shimmer
 fn shimmer_start() -> &'static Instant {
@@ -121,10 +120,10 @@ fn render_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled("⏱ ", Style::default().fg(PURPLE)),
+        Span::styled("⏱ ", Style::default().fg(DARK)),
         Span::styled(
             format!("{} elapsed", format_clock(timer_seconds)),
-            Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
+            Style::default().fg(GRAY),
         ),
     ];
 
@@ -564,29 +563,60 @@ fn render_quit_warning(frame: &mut Frame<'_>, area: Rect) {
 fn footer_shimmer_spans(text: &str) -> Vec<Span<'static>> {
     let chars: Vec<_> = text.chars().collect();
     let len = chars.len().max(1);
-    // Time-based sweep: one full pass every 1.8 seconds — ultra smooth, zero jitter
-    let elapsed_ms = shimmer_start().elapsed().as_millis() as usize;
-    let period_ms = 1800;
-    let hot = ((elapsed_ms % period_ms) * len) / period_ms;
-    // Very wide shimmer — covers ~50% of text at any point
-    let band = (len / 2).max(3);
+    let elapsed_ms = shimmer_start().elapsed().as_millis() as f32;
+    let period_ms = 2200.0;
+    let position = ((elapsed_ms % period_ms) / period_ms) * len as f32;
+    let spread = (len as f32 * 0.42).max(3.5);
+
     chars
         .into_iter()
         .enumerate()
         .map(|(i, ch)| {
-            let dist = if i >= hot { i - hot } else { len - (hot - i) };
-            let color = if dist <= 1 {
-                SHIMMER_HOT
-            } else if dist <= band {
-                SHIMMER_MID
-            } else if dist <= band + 2 {
-                SHIMMER_BASE
-            } else {
-                WHITE
-            };
+            let index = i as f32;
+            let direct = (index - position).abs();
+            let wrapped = len as f32 - direct;
+            let distance = direct.min(wrapped);
+            let intensity = smoothstep(1.0 - (distance / spread).clamp(0.0, 1.0));
+            let color = shimmer_color(intensity);
             Span::styled(ch.to_string(), Style::default().fg(color))
         })
         .collect()
+}
+
+fn smoothstep(value: f32) -> f32 {
+    let clamped = value.clamp(0.0, 1.0);
+    clamped * clamped * (3.0 - 2.0 * clamped)
+}
+
+fn shimmer_color(intensity: f32) -> Color {
+    if intensity < 0.72 {
+        blend_rgb(
+            SHIMMER_IDLE_RGB,
+            SHIMMER_BASE_RGB,
+            intensity / 0.72,
+        )
+    } else {
+        blend_rgb(
+            SHIMMER_BASE_RGB,
+            SHIMMER_HOT_RGB,
+            (intensity - 0.72) / 0.28,
+        )
+    }
+}
+
+fn blend_rgb(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> Color {
+    let mix = amount.clamp(0.0, 1.0);
+    Color::Rgb(
+        blend_channel(from.0, to.0, mix),
+        blend_channel(from.1, to.1, mix),
+        blend_channel(from.2, to.2, mix),
+    )
+}
+
+fn blend_channel(from: u8, to: u8, amount: f32) -> u8 {
+    let start = from as f32;
+    let end = to as f32;
+    (start + ((end - start) * amount)).round() as u8
 }
 
 fn pretty_status(status: AgentStatus) -> &'static str {
