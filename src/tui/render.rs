@@ -13,8 +13,8 @@ use std::time::Instant;
 use crate::internal::ui::shimmer::current_spinner_frame;
 use crate::internal::ui::theme::unicode::Symbol;
 
-const TIMER_COLOR: Color = Color::Rgb(226, 232, 240);
-const WARNING_ORANGE: Color = Color::Rgb(251, 146, 60);
+const TIMER_COLOR: Color = Color::Rgb(206, 165, 255);
+const WARNING_ORANGE: Color = Color::Rgb(255, 138, 169);
 const SHIMMER_BASE: Color = Color::Rgb(191, 219, 254);
 const SHIMMER_HOT: Color = Color::Rgb(239, 246, 255);
 const SHIMMER_MID: Color = Color::Rgb(219, 234, 254);
@@ -121,9 +121,10 @@ fn render_header(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
+        Span::styled("⏱ ", Style::default().fg(PURPLE)),
         Span::styled(
             format!("{} elapsed", format_clock(timer_seconds)),
-            Style::default().fg(TIMER_COLOR),
+            Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
         ),
     ];
 

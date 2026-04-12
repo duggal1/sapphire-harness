@@ -5,16 +5,20 @@ use super::state::AgentStatus;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-pub const PURPLE: Color = Color::Rgb(99, 102, 241);
-pub const PURPLE_SOFT: Color = Color::Rgb(165, 180, 252);
-pub const GREEN: Color = Color::Rgb(34, 197, 94);
+// Bright purple theme — matches internal/ui/theme/ansi.rs exactly
+pub const PURPLE: Color = Color::Rgb(206, 165, 255);
+pub const PURPLE_SOFT: Color = Color::Rgb(229, 214, 255);
+pub const PURPLE_GLOW: Color = Color::Rgb(167, 128, 255);
+pub const GREEN: Color = Color::Rgb(123, 231, 146);
 pub const GREEN_SOFT: Color = Color::Rgb(74, 222, 128);
-pub const RED: Color = Color::Rgb(239, 68, 68);
+pub const RED: Color = Color::Rgb(255, 138, 169);
 pub const YELLOW: Color = Color::Rgb(245, 158, 11);
-pub const WHITE: Color = Color::Rgb(248, 250, 252);
-pub const GRAY: Color = Color::Rgb(148, 163, 184);
+pub const WHITE: Color = Color::Rgb(248, 248, 255);
+pub const GRAY: Color = Color::Rgb(152, 160, 181);
 pub const DARK: Color = Color::Rgb(100, 116, 139);
-pub const BORDER: Color = Color::Rgb(71, 85, 105);
+pub const BORDER: Color = Color::Rgb(83, 78, 113);
+pub const CYAN: Color = Color::Rgb(124, 234, 255);
+pub const TEAL: Color = Color::Rgb(108, 224, 179);
 
 // ─── Status Dots ──────────────────────────────────────────────────────────
 
