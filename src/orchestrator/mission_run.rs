@@ -20,9 +20,12 @@ impl Orchestrator {
                 config,
             )?;
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let tmux = tmux::Tmux::new(None);
-            if let Err(e) = tmux.open_ghostty_batch_tabs(&session_names) {
-                tracing::warn!("could not auto-open Ghostty tabs for tmux sessions: {}", e);
+            #[cfg(target_os = "macos")]
+            {
+                let tmux = tmux::Tmux::new(None);
+                if let Err(e) = tmux.open_ghostty_batch_tabs(&session_names) {
+                    tracing::warn!("could not auto-open Ghostty tabs for tmux sessions: {}", e);
+                }
             }
             session_names
         } else {
