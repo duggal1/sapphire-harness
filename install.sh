@@ -1,182 +1,203 @@
 #!/bin/bash
-# Sapphire Agent Factory (sp) - Dead Simple Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/<user>/<repo>/main/install.sh | bash
+# Sapphire Agent Factory (sp) — Full Installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/duggal1/sapphire-harness/master/install.sh | bash
 
 set -e
 
-# Configuration
+# ── Color helpers ──────────────────────────────────────────────
+BOLD=$(tput bold 2>/dev/null || echo "")
+DIM=$(tput dim 2>/dev/null || echo "")
+GREEN=$(tput setaf 2 2>/dev/null || echo "")
+CYAN=$(tput setaf 6 2>/dev/null || echo "")
+PURPLE=$(tput setaf 5 2>/dev/null || echo "")
+YELLOW=$(tput setaf 3 2>/dev/null || echo "")
+RED=$(tput setaf 1 2>/dev/null || echo "")
+RESET=$(tput sgr0 2>/dev/null || echo "")
+
+check()  { printf "${GREEN}✔${RESET} %s\n" "$1"; }
+info()   { printf "${DIM}→${RESET} %s\n" "$1"; }
+warn()   { printf "${YELLOW}⚠${RESET} %s\n" "$1"; }
+err()    { printf "${RED}✕${RESET} %s\n" "$1" >&2; }
+
+# ── Config ─────────────────────────────────────────────────────
 REPO="sapphire-harness"
 GITHUB_USER="duggal1"
-BINARY="sp"
+BINARY_NAME="sp"
 INSTALL_DIR="${HOME}/.local/bin"
 VERSION="${SP_VERSION:-latest}"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# ── Banner ────────────────────────────────────────────────────
+print_banner() {
+    local border_color="${PURPLE}"
+    local title_color="${CYAN}"
+    local width=60
 
-# Helper functions
-info() { echo -e "${BLUE}ℹ${NC} $1"; }
-success() { echo -e "${GREEN}✓${NC} $1"; }
-warn() { echo -e "${YELLOW}⚠${NC} $1"; }
-error() { echo -e "${RED}✗${NC} $1" >&2; }
+    printf "\n"
+    printf "${border_color}┌"; printf '─%.0s' $(seq 1 $width); printf "┐${RESET}\n"
+    printf "${border_color}│${RESET}"
+    printf "%${width}s" "" | tr ' ' ' '
+    printf "${border_color}│${RESET}\n"
 
-# Detect platform
+    local line1="✨ Sapphire Agent Factory"
+    local line2="Terminal-first multi-agent orchestration CLI"
+    local pad1=$(( (width - ${#line1}) / 2 ))
+    local pad2=$(( (width - ${#line2}) / 2 ))
+
+    printf "${border_color}│${RESET}"
+    printf "%${pad1}s${title_color}${BOLD}%s${RESET}" "" "$line1"
+    printf "%$((width - pad1 - ${#line1}))s" ""
+    printf "${border_color}│${RESET}\n"
+
+    printf "${border_color}│${RESET}"
+    printf "%${pad2}s${DIM}%s${RESET}" "" "$line2"
+    printf "%$((width - pad2 - ${#line2}))s" ""
+    printf "${border_color}│${RESET}\n"
+
+    printf "${border_color}│${RESET}"
+    printf "%${width}s" "" | tr ' ' ' '
+    printf "${border_color}│${RESET}\n"
+
+    printf "${border_color}└"; printf '─%.0s' $(seq 1 $width); printf "┘${RESET}\n"
+    printf "\n"
+}
+
+# ── Detect platform ────────────────────────────────────────────
 detect_platform() {
-    local os arch platform
-
+    local os arch
     os=$(uname -s | tr '[:upper:]' '[:lower:]')
     arch=$(uname -m)
 
     case "$os" in
         darwin) os="apple-darwin" ;;
-        linux) os="unknown-linux-gnu" ;;
-        *) error "Unsupported OS: $os"; exit 1 ;;
+        linux)  os="unknown-linux-gnu" ;;
+        *)      err "Unsupported OS: $os"; exit 1 ;;
     esac
-
     case "$arch" in
-        x86_64) arch="x86_64" ;;
+        x86_64)       arch="x86_64" ;;
         arm64|aarch64) arch="aarch64" ;;
-        *) error "Unsupported architecture: $arch"; exit 1 ;;
+        *)            err "Unsupported architecture: $arch"; exit 1 ;;
     esac
 
-    platform="${arch}-${os}"
-    info "Detected platform: $platform"
-    echo "$platform"
+    printf "\n"
+    check "Detected: ${BOLD}${os}${RESET} (${BOLD}${arch}${RESET})"
+    echo "${arch}-${os}"
 }
 
-# Check prerequisites
-check_prerequisites() {
-    if ! command -v curl &> /dev/null; then
-        error "curl is required but not installed"
-        exit 1
+# ── Prerequisites ──────────────────────────────────────────────
+check_prereqs() {
+    if ! command -v curl &>/dev/null; then
+        err "curl is required"; exit 1
     fi
 }
 
-# Create install directory
+# ── Install directory ──────────────────────────────────────────
 ensure_install_dir() {
     if [ ! -d "$INSTALL_DIR" ]; then
-        info "Creating install directory: $INSTALL_DIR"
+        info "Creating install directory: ${DIM}${INSTALL_DIR}${RESET}"
         mkdir -p "$INSTALL_DIR"
     fi
 }
 
-# Download and install binary
+# ── Build & install ────────────────────────────────────────────
 install_binary() {
     local platform="$1"
-    local download_url tarball
 
-    # For now, we'll build from source if no release exists
-    # Once GitHub Releases are set up, use this pattern:
-    # download_url="https://github.com/<user>/${REPO}/releases/${VERSION}/download/${BINARY}-${platform}.tar.gz"
-    
-    info "Building from source..."
-    
-    # Check if Rust is installed
-    if ! command -v cargo &> /dev/null; then
-        error "Rust/Cargo is required for source installation"
-        error "Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    if command -v cargo &>/dev/null; then
+        local ver
+        ver=$(cargo --version 2>/dev/null || echo "unknown")
+        check "Rust found: ${DIM}${ver}${RESET}"
+    else
+        err "Rust/Cargo is required for source installation"
+        printf "  Install with: ${BOLD}curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${RESET}\n\n"
         exit 1
     fi
+
+    info "Building release binary..."
+    printf "  ${DIM}(this may take a minute)${RESET}\n\n"
 
     local build_dir
-    build_dir=$(mktemp -d)
-    info "Building in: $build_dir"
-
-    # Clone and build
-    git clone --depth 1 "https://github.com/${GITHUB_USER}/${REPO}.git" "$build_dir" 2>/dev/null || {
-        # If clone fails, use current directory if it's the repo
-        if [ -f "Cargo.toml" ] && grep -q "sapphire-agent-factory" Cargo.toml; then
-            info "Using current directory as source"
-            build_dir="$(pwd)"
-        else
-            error "Failed to clone repository and current directory is not the source"
+    if [ -f "Cargo.toml" ] && grep -q "sapphire-agent-factory" Cargo.toml 2>/dev/null; then
+        info "Using current directory as source"
+        build_dir="$(pwd)"
+    else
+        build_dir=$(mktemp -d)
+        info "Cloning repository..."
+        git clone --depth 1 "https://github.com/${GITHUB_USER}/${REPO}.git" "$build_dir" 2>/dev/null || {
+            err "Failed to clone repository"
             exit 1
-        fi
-    }
+        }
+    fi
 
     cd "$build_dir"
-    
-    info "Compiling release binary (this may take a minute)..."
     cargo build --release --quiet
-    
-    if [ ! -f "target/release/${BINARY}" ]; then
-        error "Build failed: binary not found at target/release/${BINARY}"
+
+    if [ ! -f "target/release/${BINARY_NAME}" ]; then
+        err "Build failed: binary not found"
         exit 1
     fi
 
-    # Install
-    info "Installing to ${INSTALL_DIR}/${BINARY}"
-    cp "target/release/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-    chmod +x "${INSTALL_DIR}/${BINARY}"
+    info "Installing to ${DIM}${INSTALL_DIR}/${BINARY_NAME}${RESET}"
+    cp "target/release/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+    chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
-    # Cleanup
     if [ "$build_dir" != "$(pwd)" ]; then
         rm -rf "$build_dir"
     fi
 }
 
-# Verify installation
+# ── Verify ─────────────────────────────────────────────────────
 verify_installation() {
-    local binary_path="${INSTALL_DIR}/${BINARY}"
-    
+    local binary_path="${INSTALL_DIR}/${BINARY_NAME}"
+
     if [ ! -f "$binary_path" ]; then
-        error "Installation failed: binary not found at $binary_path"
+        err "Installation failed: binary not found at ${DIM}${binary_path}${RESET}"
         exit 1
     fi
 
     if [ ! -x "$binary_path" ]; then
-        error "Installation failed: binary is not executable"
+        err "Installation failed: binary is not executable"
         exit 1
     fi
 
-    success "Installed successfully: $binary_path"
-    info "Run 'sp --help' for full documentation"
+    printf "\n"
+    check "Installed successfully: ${BOLD}${binary_path}${RESET}"
 }
 
-# Check PATH
+# ── PATH check ─────────────────────────────────────────────────
 check_path() {
     if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
-        warn "$INSTALL_DIR is not in your PATH"
-        echo ""
-        echo "Add it by running:"
-        echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-        echo "  source ~/.zshrc"
-        echo ""
-        echo "Or run directly: ${INSTALL_DIR}/${BINARY}"
+        printf "\n"
+        warn "${DIM}${INSTALL_DIR}${RESET} is not in your PATH"
+        printf "  ${DIM}echo 'export PATH=\"${INSTALL_DIR}:\\\$PATH\"' >> ~/.zshrc${RESET}\n"
+        printf "  ${DIM}source ~/.zshrc${RESET}\n"
     fi
 }
 
-# Main installation flow
-main() {
-    echo ""
-    echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}  ${GREEN}Sapphire Agent Factory (sp) Installer${NC}                  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  Multi-agent orchestration CLI for your terminal     ${BLUE}║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+# ── Quick start ────────────────────────────────────────────────
+print_quickstart() {
+    printf "\n"
+    printf "  ${CYAN}Quick start:${RESET}\n\n"
+    printf "    ${BOLD}sp qwen 2 --repo . --mission \"debug and validate the repo\"${RESET}\n"
+    printf "    ${BOLD}sp status${RESET}\n"
+    printf "    ${BOLD}sp --help${RESET}\n\n"
+    printf "  ${DIM}Docs: https://github.com/${GITHUB_USER}/${REPO}${RESET}\n"
+    printf "\n"
+}
 
-    check_prerequisites
+# ── Main ───────────────────────────────────────────────────────
+main() {
+    print_banner
+    check_prereqs
     local platform
     platform=$(detect_platform)
     ensure_install_dir
     install_binary "$platform"
     verify_installation
     check_path
+    print_quickstart
 
-    echo ""
-    success "Installation complete!"
-    echo ""
-    echo "Quick start:"
-    echo "  ${BINARY} qwen 2 --repo . --mission \"debug and validate the repo\""
-    echo "  ${BINARY} status          # Show active missions"
-    echo "  ${BINARY} --help          # Full documentation"
-    echo ""
-    echo "Learn more: https://github.com/sapphire-agent-Factory/${REPO}"
-    echo ""
+    check "Ready to orchestrate ✨"
+    printf "\n"
 }
 
 main "$@"
