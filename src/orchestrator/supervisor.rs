@@ -37,7 +37,10 @@ pub fn classify_supervisor(
         || matches!(tmux_health, SessionHealth::Dead | SessionHealth::Zombie)
     {
         SupervisorCondition::Unavailable
-    } else if matches!(tmux_health, SessionHealth::Healthy | SessionHealth::Starting) {
+    } else if matches!(
+        tmux_health,
+        SessionHealth::Healthy | SessionHealth::Starting
+    ) {
         SupervisorCondition::Healthy
     } else if matches!(tmux_health, SessionHealth::Hung) && elapsed >= stall_after.mul_f64(3.0) {
         SupervisorCondition::ProbeNeeded
@@ -48,24 +51,60 @@ pub fn classify_supervisor(
     }
 }
 
-pub fn build_repair_supervisor_prompt(
-    base_prompt: &str,
-    primary_name: &str,
-    repair_name: &str,
-) -> String {
-    format!(
-        "{base_prompt}\n\n---\n\n# REPAIR SUPERVISOR MODE\n\n- You are {repair_name}, the standby repair supervisor.\n- The primary supervisor is {primary_name}.\n- Stay synchronized with mission state.\n- Do NOT issue worker actions while the primary supervisor is healthy.\n- When you receive a TAKEOVER prompt, become the acting supervisor immediately.\n- Once acting, supervise normally, drive cleanup, and produce the final concise markdown summary.\n- If the primary is unavailable, keep the company moving. Do not freeze the team.\n- Never direct any worker to run `git push`, `git restore`, or `git reset`.\n- Treat dirty git trees as normal multi-agent conditions unless git itself is broken.\n"
-    )
-}
-
-pub fn build_repair_sync_prompt(card: &str, primary_name: &str) -> String {
-    format!(
-        "STANDBY SYNC ONLY.\nPrimary supervisor: {primary_name}.\nTrack this state quietly and be ready to take over if needed.\n\n{card}"
-    )
-}
-
 pub fn build_takeover_prompt(card: &str, failed_supervisor_name: &str) -> String {
     format!(
-        "TAKEOVER NOW.\nThe primary supervisor {failed_supervisor_name} is unavailable or unhealthy.\nYou are now the acting supervisor. Resume active supervision immediately, keep worker coordination moving, and provide concise supervisory markdown when the mission is complete.\n\n{card}"
+        "TAKEOVER NOW.\nThe active supervisor {failed_supervisor_name} is unavailable or unhealthy.\nYou are now the acting supervisor. Resume active supervision immediately, diagnose liveness and reporting incidents, and force workers toward terminal states with evidence.\n\n{card}"
     )
+}
+
+pub fn summarize_notice(event_type: SupervisorEventType, body: &str) -> String {
+    let prefix = match event_type {
+        SupervisorEventType::Stall => "Stall incident",
+        SupervisorEventType::DoneClaimed => "Validation required",
+        SupervisorEventType::WeakOutput => "Weak execution",
+        SupervisorEventType::Contradiction => "Ownership conflict",
+        SupervisorEventType::Blocked => "Blocker incident",
+        SupervisorEventType::Failed => "Runtime failure",
+        SupervisorEventType::Notice => "Supervision update",
+    };
+    format!("{prefix}: {}", truncate_inline(body, 160))
+}
+
+pub fn summarize_action(action: &str, target: Option<&str>, summary: &str) -> String {
+    let target = target.unwrap_or("mission");
+    format!(
+        "{} {}: {}",
+        action.trim().replace('_', " "),
+        target,
+        truncate_inline(summary, 140)
+    )
+}
+
+pub fn summarize_state_card(card: &str) -> String {
+    let branch = card
+        .lines()
+        .find(|line| line.starts_with("Your branch:"))
+        .map(|line| line.trim_start_matches("Your branch:").trim())
+        .unwrap_or("supervision branch active");
+    let global = card
+        .lines()
+        .find(|line| line.starts_with("Global mission:"))
+        .map(|line| line.trim_start_matches("Global mission:").trim())
+        .unwrap_or("workers=0");
+    format!(
+        "{} | {}",
+        truncate_inline(branch, 96),
+        truncate_inline(global, 96)
+    )
+}
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        normalized
+    } else {
+        let mut rendered = normalized.chars().take(max_chars).collect::<String>();
+        rendered.push_str("...");
+        rendered
+    }
 }

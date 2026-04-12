@@ -4,7 +4,6 @@ use crate::model::WorkerPacket;
 
 use super::communication_policy;
 use super::coordination;
-use super::launch_prompt::preferred_state_roots;
 
 pub fn render_supervisor_bootstrap(
     base_prompt: String,
@@ -33,22 +32,12 @@ pub fn render_worker_bootstrap(
     memory_block: Option<&str>,
 ) -> String {
     let display_name = &packet.display_name;
-    let (primary_root, secondary_root) = preferred_state_roots(state_dir);
-    let prompt_path = primary_root.join("prompts").join(format!("{display_name}.md"));
-    let secondary_prompt_path = secondary_root.join("prompts").join(format!("{display_name}.md"));
-    let status_path = primary_root
+    let prompt_path = state_dir.join("prompts").join(format!("{display_name}.md"));
+    let status_path = state_dir
         .join("workers")
         .join(display_name)
         .join("status.json");
-    let secondary_status_path = secondary_root
-        .join("workers")
-        .join(display_name)
-        .join("status.json");
-    let memory_path = primary_root
-        .join("workers")
-        .join(display_name)
-        .join("memory.json");
-    let secondary_memory_path = secondary_root
+    let memory_path = state_dir
         .join("workers")
         .join(display_name)
         .join("memory.json");
@@ -56,19 +45,41 @@ pub fn render_worker_bootstrap(
 
     // Inject persistent memory block if available — this is what makes agents
     // remember what they did last session, last mission. No amnesia on reboot.
-    let memory_section = memory_block
-        .map(|m| format!("{m}\n\n"))
-        .unwrap_or_default();
+    let memory_section = memory_block.map(|m| format!("{m}\n\n")).unwrap_or_default();
+    let boot_contract = format!(
+        "Execution boot order:\n\
+1. Read the assignment file once.\n\
+2. Write the first real status immediately to {status_path} before repo exploration.\n\
+3. Then start execution inside owned scope.\n\
+\n\
+First status requirements:\n\
+- It must describe the true current state, not a plan.\n\
+- Include exact next action.\n\
+- Include touched files only if you already touched them; otherwise use an empty list.\n\
+- Include commands only if already run; otherwise use an empty list.\n\
+- If the status file write fails, emit one raw SAPPHIRE_STATUS line immediately.\n\
+\n\
+Transient failure recovery:\n\
+- If the CLI hits rate limit, transport disconnect, ECONNRESET, retry UI, or similar provider/runtime failure, do NOT restart the mission and do NOT re-ask for the task.\n\
+- Recover in place from the last confirmed work state.\n\
+- After recovery, emit one exact status with files, commands, blockers, and next action.\n\
+- If a tool call fails because your arguments are invalid, correct the call and continue the same owned task.\n\
+\n\
+Anti-drift rules:\n\
+- Do not restate the assignment file.\n\
+- Do not ask for the top-level mission again.\n\
+- Do not wander outside owned scope without a real dependency.\n\
+- If blocked by another worker, send Sapphire mail instead of broad narration.",
+        status_path = status_path.display(),
+    );
 
     format!(
-        "File paths for this worker:\n- Role assignment: {prompt_path} (fallback: {secondary_prompt_path})\n- Status file: {status_path} (fallback: {secondary_status_path})\n- Memory file: {memory_path} (fallback: {secondary_memory_path})\n- AGENTS.md: {agents}\n\nPreferred coordination lanes: {preferred_counterparts}.\n\n{memory_section}{base_prompt}",
+        "File paths for this worker:\n- Role assignment: {prompt_path}\n- Status file: {status_path}\n- Memory file: {memory_path}\n- AGENTS.md: {agents}\n\nPreferred coordination lanes: {preferred_counterparts}.\n\n{boot_contract}\n\n{memory_section}{base_prompt}",
         agents = agents_path.display(),
         prompt_path = prompt_path.display(),
-        secondary_prompt_path = secondary_prompt_path.display(),
         status_path = status_path.display(),
-        secondary_status_path = secondary_status_path.display(),
         memory_path = memory_path.display(),
-        secondary_memory_path = secondary_memory_path.display(),
         preferred_counterparts = preferred_counterparts,
+        boot_contract = boot_contract,
     )
 }

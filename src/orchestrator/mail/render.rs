@@ -3,8 +3,8 @@
 
 use uuid::Uuid;
 
+use super::types::normalize_message_type;
 use crate::protocol::MailDirective;
-use super::types::{normalize_message_type};
 
 /// Render mail for PTY injection with engineering-team semantics.
 /// Each type gets a distinct header format so agents instantly understand intent.
@@ -64,7 +64,11 @@ pub fn render_mail_for_delivery(
             sender = sender_name,
             thread = thread_id,
             subject = directive.subject,
-            body = if directive.request.is_empty() { &directive.context } else { &directive.request },
+            body = if directive.request.is_empty() {
+                &directive.context
+            } else {
+                &directive.request
+            },
         ),
         _ => format!(
             "[SAPPHIRE NOTICE]\n\
@@ -73,7 +77,11 @@ pub fn render_mail_for_delivery(
             to = directive.to,
             thread = thread_id,
             subject = directive.subject,
-            body = if directive.request.is_empty() { &directive.context } else { &directive.request },
+            body = if directive.request.is_empty() {
+                &directive.context
+            } else {
+                &directive.request
+            },
         ),
     };
 

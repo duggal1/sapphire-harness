@@ -1,4 +1,4 @@
 #[path = "shimmer.rs"]
-mod shimmer_impl;
+pub mod shimmer_impl;
 
-pub use shimmer_impl::{prefix_glyph_span, shimmer_spans};
+pub use shimmer_impl::current_spinner_frame;

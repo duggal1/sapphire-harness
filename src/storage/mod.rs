@@ -1,10 +1,10 @@
 pub mod history;
 
 pub mod agent_memory;
-pub mod live_state;
-pub mod transcripts;
-pub mod mail_store;
 pub mod lease_store;
+pub mod live_state;
+pub mod mail_store;
+pub mod transcripts;
 
 mod types;
 
@@ -21,17 +21,17 @@ use uuid::Uuid;
 use crate::agent::AgentKind;
 use crate::model::{
     EventRecord, LeaseRecord, MailRecord, MissionPlan, MissionRecord, MissionSnapshot,
-    MissionStatus, NormalizedUpdateRecord, ReplayEntry, RestartRecord, SessionListItem, SessionRecord,
-    SessionRole, SessionState, SummaryRecord, TaskRecord, ValidationResultRecord, WorkerPacket,
-    WorkerSnapshot,
+    MissionStatus, NormalizedUpdateRecord, ReplayEntry, RestartRecord, SessionListItem,
+    SessionRecord, SessionRole, SessionState, SummaryRecord, TaskRecord, ValidationResultRecord,
+    WorkerPacket, WorkerSnapshot,
 };
 
-use self::history::{SessionHistory, HistoryIndex};
 use self::agent_memory::AgentMemoryStore;
-use self::live_state::LiveState;
-use self::transcripts::TranscriptStore;
-use self::mail_store::MailStore;
+use self::history::{HistoryIndex, SessionHistory};
 use self::lease_store::LeaseStore;
+use self::live_state::LiveState;
+use self::mail_store::MailStore;
+use self::transcripts::TranscriptStore;
 
 /// Unified Store facade — backwards-compatible API, zero SQLite.
 ///
@@ -78,18 +78,35 @@ impl Store {
         })
     }
 
-    pub fn state_dir(&self) -> &Path { &self.state_dir }
-    pub fn live_state(&self) -> Arc<RwLock<LiveState>> { self.live_state.clone() }
-    pub fn transcripts(&self) -> &TranscriptStore { &self.transcripts }
-    pub fn mail_store(&self) -> &MailStore { &self.mail }
-    pub fn lease_store(&self) -> &LeaseStore { &self.leases }
-    pub fn agent_memory(&self) -> &AgentMemoryStore { &self.agent_memory }
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+    pub fn live_state(&self) -> Arc<RwLock<LiveState>> {
+        self.live_state.clone()
+    }
+    pub fn transcripts(&self) -> &TranscriptStore {
+        &self.transcripts
+    }
+    pub fn mail_store(&self) -> &MailStore {
+        &self.mail
+    }
+    pub fn lease_store(&self) -> &LeaseStore {
+        &self.leases
+    }
+    pub fn agent_memory(&self) -> &AgentMemoryStore {
+        &self.agent_memory
+    }
 
     // ─── Mission Persistence ─────────────────────────────────────────────
 
     pub fn persist_mission(&self, mission: &MissionRecord, plan: &MissionPlan) -> Result<()> {
         self.history.write_mission(&mission.id, mission, plan)?;
-        self.history_index.upsert(&mission.id, &mission.repo_path, &mission.mission, &mission.status)?;
+        self.history_index.upsert(
+            &mission.id,
+            &mission.repo_path,
+            &mission.mission,
+            &mission.status,
+        )?;
         Ok(())
     }
 
@@ -116,7 +133,8 @@ impl Store {
         session: &SessionRecord,
         packet: Option<&WorkerPacket>,
     ) -> Result<()> {
-        self.history.write_worker(&session.mission_id, session, packet)?;
+        self.history
+            .write_worker(&session.mission_id, session, packet)?;
         Ok(())
     }
 
@@ -192,19 +210,35 @@ impl Store {
         status: &str,
         ack_state: &str,
     ) -> Result<()> {
-        self.mail.update_message_status(&message_id, status, ack_state)
+        self.mail
+            .update_message_status(&message_id, status, ack_state)
     }
 
     pub fn archive_resolved_mail(&self, mission_id: Uuid, older_than_secs: u64) -> Result<usize> {
-        self.mail.archive_resolved_mail(&mission_id, older_than_secs)
+        self.mail
+            .archive_resolved_mail(&mission_id, older_than_secs)
     }
 
-    pub fn search_mail(&self, mission_id: Uuid, query: Option<&str>, from_worker: Option<Uuid>, msg_type: Option<&str>, limit: usize) -> Result<Vec<serde_json::Value>> {
-        self.mail.search_mail(&mission_id, query, from_worker, msg_type, limit)
+    pub fn search_mail(
+        &self,
+        mission_id: Uuid,
+        query: Option<&str>,
+        from_worker: Option<Uuid>,
+        msg_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.mail
+            .search_mail(&mission_id, query, from_worker, msg_type, limit)
     }
 
-    pub fn claim_scavenge_mail(&self, mail_id: Uuid, claimer_id: Uuid, claimer_name: &str) -> Result<usize> {
-        self.mail.claim_scavenge_mail(&mail_id, &claimer_id, claimer_name)
+    pub fn claim_scavenge_mail(
+        &self,
+        mail_id: Uuid,
+        claimer_id: Uuid,
+        claimer_name: &str,
+    ) -> Result<usize> {
+        self.mail
+            .claim_scavenge_mail(&mail_id, &claimer_id, claimer_name)
     }
 
     pub fn release_scavenge_mail(&self, mail_id: Uuid, releaser_id: Uuid) -> Result<usize> {
@@ -268,7 +302,8 @@ impl Store {
     // ─── Validation Results ──────────────────────────────────────────────
 
     pub fn persist_validation_result(&self, result: &ValidationResultRecord) -> Result<()> {
-        self.history.write_validation_result(&result.mission_id, result)
+        self.history
+            .write_validation_result(&result.mission_id, result)
     }
 
     // ─── Restart Tracking (in live_state for crash loop detection) ───────
@@ -284,15 +319,17 @@ impl Store {
 
     pub fn load_restart_state(&self, session_id: Uuid) -> Result<Option<RestartRecord>> {
         let state = self.live_state.read();
-        Ok(state.load_restart_state(&session_id).map(|s| crate::model::RestartRecord {
-            id: Uuid::new_v4(),
-            session_id: s.session_id,
-            mission_id: s.mission_id,
-            restart_count: s.restart_count,
-            first_restart_at: s.first_restart_at,
-            last_restart_at: s.last_restart_at,
-            backoff_seconds: s.backoff_seconds,
-        }))
+        Ok(state
+            .load_restart_state(&session_id)
+            .map(|s| crate::model::RestartRecord {
+                id: Uuid::new_v4(),
+                session_id: s.session_id,
+                mission_id: s.mission_id,
+                restart_count: s.restart_count,
+                first_restart_at: s.first_restart_at,
+                last_restart_at: s.last_restart_at,
+                backoff_seconds: s.backoff_seconds,
+            }))
     }
 
     pub fn reset_restart_tracker(&self, session_id: Uuid) -> Result<()> {
@@ -357,7 +394,8 @@ impl Store {
         worker_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ReplayEntry>> {
-        self.history.recent_worker_replay(&mission_id, &worker_id, limit)
+        self.history
+            .recent_worker_replay(&mission_id, &worker_id, limit)
     }
 
     pub fn latest_supervisor_summary(&self, mission_id: Uuid) -> Result<Option<String>> {
@@ -370,7 +408,7 @@ impl Store {
 }
 
 // Helper functions for role parsing (ported from old store)
-fn role_name(role: SessionRole) -> &'static str {
+pub fn role_name(role: SessionRole) -> &'static str {
     match role {
         SessionRole::Supervisor => "supervisor",
         SessionRole::Worker => "worker",
@@ -386,5 +424,322 @@ fn parse_role(value: &str) -> Option<SessionRole> {
 }
 
 // Restart tracking constants
-fn restart_base_secs() -> u64 { 2 }
-fn restart_max_secs() -> u64 { 300 }
+fn restart_base_secs() -> u64 {
+    2
+}
+fn restart_max_secs() -> u64 {
+    300
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn temp_store() -> (Store, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        (store, dir)
+    }
+
+    fn make_mission_record(mission_id: Uuid, mission_text: &str) -> MissionRecord {
+        MissionRecord {
+            id: mission_id,
+            repo_path: PathBuf::from("."),
+            mission: mission_text.to_string(),
+            mission_rewrite: String::new(),
+            worker_agent: AgentKind::Codex,
+            supervisor_agent: AgentKind::Codex,
+            worker_count: 1,
+            status: MissionStatus::Planned,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            final_summary: None,
+        }
+    }
+
+    fn make_session_record(session_id: Uuid, mission_id: Uuid) -> SessionRecord {
+        SessionRecord {
+            id: session_id,
+            mission_id,
+            role: SessionRole::Worker,
+            ordinal: 1,
+            agent: AgentKind::Codex,
+            terminal_id: "test-pty".to_string(),
+            name: "Engineer-1".to_string(),
+            owned_scope: String::new(),
+            status: SessionState::NotStarted,
+            launch_command: vec!["codex".to_string()],
+            last_heartbeat_at: Utc::now(),
+            last_summary: None,
+        }
+    }
+
+    fn make_plan(mission_text: &str) -> MissionPlan {
+        MissionPlan {
+            mission_rewrite: mission_text.to_string(),
+            workstreams: vec![],
+            risk_map: vec![],
+            worker_packets: vec![],
+            supervision_strategy: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn store_open_creates_state_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sp-test-store");
+        assert!(!path.exists());
+        let _store = Store::open(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn mission_lifecycle_persist_and_status_update() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        let plan = make_plan("test mission");
+        let record = make_mission_record(mission_id, "test mission");
+        store.persist_mission(&record, &plan).unwrap();
+        store
+            .update_mission_status(mission_id, MissionStatus::Running)
+            .unwrap();
+        store
+            .update_mission_status(mission_id, MissionStatus::Completed)
+            .unwrap();
+        let snapshot = store.load_mission_snapshot(mission_id).unwrap();
+        assert!(snapshot.is_some());
+    }
+
+    #[test]
+    fn mission_final_summary() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        let plan = make_plan("test");
+        let record = make_mission_record(mission_id, "test");
+        store.persist_mission(&record, &plan).unwrap();
+        store
+            .update_mission_final_summary(mission_id, "All done.")
+            .unwrap();
+        let snapshot = store.load_mission_snapshot(mission_id).unwrap().unwrap();
+        assert_eq!(snapshot.final_summary.as_deref(), Some("All done."));
+    }
+
+    #[test]
+    fn mission_plan_replacement() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "init"), &make_plan("init"))
+            .unwrap();
+        store
+            .replace_mission_plan(mission_id, &make_plan("revised"))
+            .unwrap();
+        let snapshot = store.load_mission_snapshot(mission_id).unwrap().unwrap();
+        assert_eq!(snapshot.plan.mission_rewrite, "revised");
+    }
+
+    #[test]
+    fn worker_session_persist_and_load() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "test"), &make_plan("test"))
+            .unwrap();
+        let session_id = Uuid::new_v4();
+        let session = make_session_record(session_id, mission_id);
+        let packet = WorkerPacket {
+            worker_id: "1".to_string(),
+            role: "Software Engineer".to_string(),
+            role_type: "software-engineer".to_string(),
+            display_name: "Engineer-1".to_string(),
+            starting_angle: String::new(),
+            owned_scope: "src/".to_string(),
+            explicit_task: "Implement feature".to_string(),
+            out_of_scope: String::new(),
+            definition_of_done: vec!["Tests pass".to_string()],
+            required_evidence: vec![],
+            blocker_protocol: "Report exact files, errors, dependency".to_string(),
+            conflict_warning: "Do not touch files owned by other workers".to_string(),
+            communication_rules: vec![],
+            validation_standard: vec![],
+            expected_output_format: vec![],
+        };
+        store.persist_session(&session, Some(&packet)).unwrap();
+        let workers = store.load_workers(mission_id).unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].packet.as_ref().unwrap().display_name, "Engineer-1");
+    }
+
+    #[test]
+    fn worker_state_update() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "test"), &make_plan("test"))
+            .unwrap();
+        let session_id = Uuid::new_v4();
+        store
+            .persist_session(&make_session_record(session_id, mission_id), None)
+            .unwrap();
+        // update_session_state is currently a no-op (state tracked in live_state).
+        // Verify session persists and loads with initial state.
+        let workers = store.load_workers(mission_id).unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].session.status, SessionState::NotStarted);
+    }
+
+    #[test]
+    fn task_persist_and_find() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "test"), &make_plan("test"))
+            .unwrap();
+        let worker_id = Uuid::new_v4();
+        store
+            .persist_session(&make_session_record(worker_id, mission_id), None)
+            .unwrap();
+        let task = TaskRecord {
+            id: Uuid::new_v4(),
+            mission_id,
+            worker_id,
+            title: "Implement foo".to_string(),
+            description: "src/foo.rs".to_string(),
+            status: "pending".to_string(),
+            priority: "high".to_string(),
+            depends_on_json: "[]".to_string(),
+            definition_of_done_json: "[\"Tests pass\"]".to_string(),
+        };
+        store.persist_task(&task).unwrap();
+        let found = store.find_task_id(mission_id, worker_id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), task.id);
+    }
+
+    #[test]
+    fn lease_upsert_and_lookup() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        let lease = LeaseRecord {
+            mission_id,
+            path: "src/foo.rs".to_string(),
+            owner_session_id: Uuid::new_v4(),
+            intent: "edit".to_string(),
+            status: "claim".to_string(),
+            updated_at: Utc::now(),
+        };
+        store.upsert_lease(&lease).unwrap();
+        let existing = store.get_existing_lease(mission_id, "src/foo.rs").unwrap();
+        assert!(existing.is_some());
+        assert_eq!(existing.unwrap().path, "src/foo.rs");
+    }
+
+    #[test]
+    fn restart_tracking_basic() {
+        let (store, _dir) = temp_store();
+        let session_id = Uuid::new_v4();
+        let mission_id = Uuid::new_v4();
+        store
+            .upsert_restart_attempt(session_id, mission_id)
+            .unwrap();
+        let state = store.load_restart_state(session_id).unwrap();
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().restart_count, 1);
+    }
+
+    #[test]
+    fn restart_backoff_exponential() {
+        let (store, _dir) = temp_store();
+        let session_id = Uuid::new_v4();
+        let mission_id = Uuid::new_v4();
+        store
+            .upsert_restart_attempt(session_id, mission_id)
+            .unwrap();
+        let state = store.load_restart_state(session_id).unwrap().unwrap();
+        assert_eq!(state.backoff_seconds, 2.0);
+        store
+            .upsert_restart_attempt(session_id, mission_id)
+            .unwrap();
+        let state = store.load_restart_state(session_id).unwrap().unwrap();
+        assert_eq!(state.backoff_seconds, 4.0);
+        store
+            .upsert_restart_attempt(session_id, mission_id)
+            .unwrap();
+        let state = store.load_restart_state(session_id).unwrap().unwrap();
+        assert_eq!(state.backoff_seconds, 8.0);
+    }
+
+    #[test]
+    fn crash_loop_detection() {
+        let (store, _dir) = temp_store();
+        let session_id = Uuid::new_v4();
+        let mission_id = Uuid::new_v4();
+        for _ in 0..5 {
+            store
+                .upsert_restart_attempt(session_id, mission_id)
+                .unwrap();
+        }
+        assert!(
+            store
+                .is_crash_loop(session_id, 3, Duration::from_secs(300))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn restart_tracker_reset() {
+        let (store, _dir) = temp_store();
+        let session_id = Uuid::new_v4();
+        let mission_id = Uuid::new_v4();
+        store
+            .upsert_restart_attempt(session_id, mission_id)
+            .unwrap();
+        store.reset_restart_tracker(session_id).unwrap();
+        let state = store.load_restart_state(session_id).unwrap();
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn list_missions_from_history_index() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "test"), &make_plan("test"))
+            .unwrap();
+        let items = store.list_sessions().unwrap();
+        let found = items.iter().find(|m| m.id == mission_id);
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn load_mission_snapshot() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(
+                &make_mission_record(mission_id, "snapshot"),
+                &make_plan("snapshot"),
+            )
+            .unwrap();
+        let snapshot = store.load_mission_snapshot(mission_id).unwrap();
+        assert!(snapshot.is_some());
+        assert_eq!(snapshot.unwrap().plan.mission_rewrite, "snapshot");
+    }
+
+    #[test]
+    fn append_and_load_supervisor_summary() {
+        let (store, _dir) = temp_store();
+        let mission_id = Uuid::new_v4();
+        store
+            .persist_mission(&make_mission_record(mission_id, "test"), &make_plan("test"))
+            .unwrap();
+        let supervisor_id = Uuid::new_v4();
+        store
+            .append_summary(mission_id, Some(supervisor_id), "supervisor_action", "All done.")
+            .unwrap();
+        let summary = store.latest_supervisor_summary(mission_id).unwrap();
+        assert!(summary.is_some());
+        assert!(summary.unwrap().contains("All done."));
+    }
+}

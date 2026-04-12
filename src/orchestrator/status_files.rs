@@ -2,9 +2,6 @@ use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::Result;
-use serde_json::json;
-
 use crate::protocol::StatusDirective;
 
 pub struct StatusFileUpdate {
@@ -14,24 +11,19 @@ pub struct StatusFileUpdate {
 }
 
 pub fn load_status_file_update(
-    primary_path: &Path,
-    hidden_path: &Path,
+    status_path: &Path,
     previous_modified: Option<SystemTime>,
 ) -> Option<StatusFileUpdate> {
-    let source_path = if primary_path.exists() {
-        primary_path
-    } else if hidden_path.exists() {
-        hidden_path
-    } else {
+    if !status_path.exists() {
         return None;
-    };
+    }
 
-    let modified_at = fs::metadata(source_path).ok()?.modified().ok()?;
+    let modified_at = fs::metadata(status_path).ok()?.modified().ok()?;
     if previous_modified.is_some_and(|previous| modified_at <= previous) {
         return None;
     }
 
-    let content = fs::read_to_string(source_path).ok()?;
+    let content = fs::read_to_string(status_path).ok()?;
     let status_obj: serde_json::Value = serde_json::from_str(&content).ok()?;
     let state = status_obj.get("state")?.as_str()?.to_owned();
     let summary = status_obj
@@ -63,34 +55,6 @@ pub fn load_status_file_update(
         },
         bootstrap,
     })
-}
-
-pub fn write_bootstrap_status_files(
-    primary_path: &Path,
-    hidden_path: &Path,
-    summary: &str,
-) -> Result<()> {
-    let payload = json!({
-        "state": "progressing",
-        "summary": summary,
-        "files": [],
-        "commands": [],
-        "risks": [],
-        "overlap": "none",
-        "bootstrap": true,
-    });
-    let content = serde_json::to_string(&payload)?;
-    write_status_file(primary_path, &content)?;
-    write_status_file(hidden_path, &content)?;
-    Ok(())
-}
-
-fn write_status_file(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, content)?;
-    Ok(())
 }
 
 fn collect_string_array(value: Option<&serde_json::Value>) -> Vec<String> {

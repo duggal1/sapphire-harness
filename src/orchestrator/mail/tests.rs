@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use super::types::*;
-use super::timeouts::*;
-use super::render::*;
-use super::nudge_queue::*;
 use super::PendingMail;
+use super::nudge_queue::*;
+use super::render::*;
+use super::timeouts::*;
+use super::types::*;
 use crate::protocol::{MailDirective, SapphireDirective, consume_directives};
 
 // ─── Test fixtures ───────────────────────────────────────────────────────────
@@ -309,7 +309,11 @@ fn validate_mail_allows_self_mail_for_task_and_notification() {
     for msg_type in &["task", "notification"] {
         let directive = make_mail_directive("self", msg_type, "normal", "self-mail");
         let err = validate_mail(&directive, session, session);
-        assert!(err.is_none(), "self-mail should be allowed for {}", msg_type);
+        assert!(
+            err.is_none(),
+            "self-mail should be allowed for {}",
+            msg_type
+        );
     }
 }
 
@@ -416,7 +420,13 @@ fn render_mail_for_delivery_includes_all_fields() {
         suppress_notify: false,
     };
     let rendered = render_mail_for_delivery(
-        Uuid::new_v4(), "thread-42", "Engineer-1", &directive, &[], true, false
+        Uuid::new_v4(),
+        "thread-42",
+        "Engineer-1",
+        &directive,
+        &[],
+        true,
+        false,
     );
     assert!(rendered.contains("Engineer-1"));
     assert!(rendered.contains("Engineer-2"));
@@ -536,7 +546,8 @@ fn parses_notification_mail_without_ack() {
 #[test]
 fn parses_ack_directive_acked() {
     let mut buffer = String::new();
-    let chunk = "SAPPHIRE_ACK {\"mail_id\":\"mail-123\",\"status\":\"acked\",\"summary\":\"on it\"}\n";
+    let chunk =
+        "SAPPHIRE_ACK {\"mail_id\":\"mail-123\",\"status\":\"acked\",\"summary\":\"on it\"}\n";
     let directives = consume_directives(&mut buffer, chunk);
     assert_eq!(directives.len(), 1);
     let ack = match &directives[0] {
@@ -686,7 +697,11 @@ fn full_mail_exchange_task_to_ack() {
         SapphireDirective::Mail(m) => m,
         _ => panic!("expected task mail"),
     };
-    assert!(requires_ack(&task_mail.message_type, &task_mail.priority, task_mail.requires_ack));
+    assert!(requires_ack(
+        &task_mail.message_type,
+        &task_mail.priority,
+        task_mail.requires_ack
+    ));
 
     // Step 2: Engineer-2 acknowledges
     buffer.clear();
@@ -719,7 +734,10 @@ fn full_mail_exchange_escalation_with_cc() {
     assert_eq!(mail.cc, vec!["Engineer-2"]);
     assert!(mail.requires_ack);
     assert_eq!(normalize_message_type(&mail.message_type), "escalation");
-    assert_eq!(derive_delivery_mode(&mail.priority, &mail.delivery_mode), "interrupt");
+    assert_eq!(
+        derive_delivery_mode(&mail.priority, &mail.delivery_mode),
+        "interrupt"
+    );
 }
 
 #[test]
@@ -739,7 +757,11 @@ fn full_mail_exchange_scavenge_claim_workflow() {
     };
     assert_eq!(scavenge.message_type, "scavenge");
     assert_eq!(normalize_message_type(&scavenge.message_type), "scavenge");
-    assert!(requires_ack(&scavenge.message_type, &scavenge.priority, scavenge.requires_ack));
+    assert!(requires_ack(
+        &scavenge.message_type,
+        &scavenge.priority,
+        scavenge.requires_ack
+    ));
 }
 
 #[test]
@@ -766,9 +788,16 @@ fn full_mail_exchange_reply_threading() {
         _ => panic!("expected mail"),
     };
     assert_eq!(reply.message_type, "reply");
-    assert_eq!(reply.reply_to, Some("00000000-0000-0000-0000-000000000004".to_owned()));
+    assert_eq!(
+        reply.reply_to,
+        Some("00000000-0000-0000-0000-000000000004".to_owned())
+    );
     assert_eq!(reply.thread_id, Some("api-thread".to_owned()));
-    assert!(!requires_ack(&reply.message_type, &reply.priority, reply.requires_ack));
+    assert!(!requires_ack(
+        &reply.message_type,
+        &reply.priority,
+        reply.requires_ack
+    ));
 }
 
 #[test]
@@ -785,7 +814,11 @@ fn full_mail_exchange_notification_no_ack() {
         _ => panic!("expected mail"),
     };
     assert_eq!(mail.message_type, "notification");
-    assert!(!requires_ack(&mail.message_type, &mail.priority, mail.requires_ack));
+    assert!(!requires_ack(
+        &mail.message_type,
+        &mail.priority,
+        mail.requires_ack
+    ));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -904,11 +937,11 @@ fn urgent_timeout_has_shorter_interval() {
 #[test]
 fn all_five_message_types_parse_correctly() {
     let message_types = vec![
-        ("task", true),      // requires ack
-        ("reply", false),    // no ack
+        ("task", true),          // requires ack
+        ("reply", false),        // no ack
         ("notification", false), // no ack for normal priority
-        ("escalation", true), // requires ack
-        ("scavenge", true),  // requires ack
+        ("escalation", true),    // requires ack
+        ("scavenge", true),      // requires ack
     ];
 
     for (msg_type, expects_ack) in message_types {

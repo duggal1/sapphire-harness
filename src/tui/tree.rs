@@ -41,7 +41,11 @@ pub fn branch_muted(
 }
 
 pub fn item_branch(index: usize, total: usize) -> &'static str {
-    if index + 1 == total { "└─ " } else { "├─ " }
+    if index + 1 == total {
+        "└─ "
+    } else {
+        "├─ "
+    }
 }
 
 pub fn child_branch(index: usize, total: usize) -> &'static str {

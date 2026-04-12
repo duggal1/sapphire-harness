@@ -45,7 +45,12 @@ impl SessionHistory {
 
     // ─── Write Operations ──────────────────────────────────────────────
 
-    pub fn write_mission(&self, mission_id: &Uuid, mission: &MissionRecord, plan: &MissionPlan) -> Result<()> {
+    pub fn write_mission(
+        &self,
+        mission_id: &Uuid,
+        mission: &MissionRecord,
+        plan: &MissionPlan,
+    ) -> Result<()> {
         let dir = self.mission_dir(mission_id);
         std::fs::create_dir_all(&dir)?;
 
@@ -181,7 +186,8 @@ impl SessionHistory {
             let line = line?;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                 if val.get("type").and_then(|v| v.as_str()) == Some("task") {
-                    if val.get("worker_id").and_then(|v| v.as_str()) == Some(&worker_id.to_string()) {
+                    if val.get("worker_id").and_then(|v| v.as_str()) == Some(&worker_id.to_string())
+                    {
                         if let Some(id_str) = val.get("id").and_then(|v| v.as_str()) {
                             if let Ok(id) = Uuid::parse_str(id_str) {
                                 last_task_id = Some(id);
@@ -206,7 +212,11 @@ impl SessionHistory {
         self.append_line(mission_id, &line)
     }
 
-    pub fn write_validation_result(&self, mission_id: &Uuid, result: &ValidationResultRecord) -> Result<()> {
+    pub fn write_validation_result(
+        &self,
+        mission_id: &Uuid,
+        result: &ValidationResultRecord,
+    ) -> Result<()> {
         let line = serde_json::json!({
             "type": "validation",
             "id": result.id,
@@ -244,7 +254,8 @@ impl SessionHistory {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                 match val.get("type").and_then(|v| v.as_str()) {
                     Some("mission") => {
-                        if let Ok(m) = serde_json::from_value::<MissionRecordFromJson>(val.clone()) {
+                        if let Ok(m) = serde_json::from_value::<MissionRecordFromJson>(val.clone())
+                        {
                             mission_record = Some(m.into_record());
                         }
                         if let Some(p) = val.get("plan") {
@@ -253,32 +264,31 @@ impl SessionHistory {
                             }
                         }
                     }
-                    Some("mission_update") => {
-                        match val.get("field").and_then(|v| v.as_str()) {
-                            Some("status") => {
-                                if let Some(rec) = &mut mission_record {
-                                    if let Some(s) = val.get("value").and_then(|v| v.as_str()) {
-                                        if let Ok(st) = MissionStatus::from_str(s) {
-                                            rec.status = st;
-                                        }
+                    Some("mission_update") => match val.get("field").and_then(|v| v.as_str()) {
+                        Some("status") => {
+                            if let Some(rec) = &mut mission_record {
+                                if let Some(s) = val.get("value").and_then(|v| v.as_str()) {
+                                    if let Ok(st) = MissionStatus::from_str(s) {
+                                        rec.status = st;
                                     }
                                 }
                             }
-                            Some("final_summary") => {
-                                if let Some(rec) = &mut mission_record {
-                                    rec.final_summary = val.get("value").and_then(|v| v.as_str()).map(String::from);
-                                }
-                            }
-                            Some("plan") => {
-                                if let Some(p) = val.get("value") {
-                                    if let Ok(pl) = serde_json::from_value::<MissionPlan>(p.clone()) {
-                                        plan = Some(pl);
-                                    }
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        Some("final_summary") => {
+                            if let Some(rec) = &mut mission_record {
+                                rec.final_summary =
+                                    val.get("value").and_then(|v| v.as_str()).map(String::from);
+                            }
+                        }
+                        Some("plan") => {
+                            if let Some(p) = val.get("value") {
+                                if let Ok(pl) = serde_json::from_value::<MissionPlan>(p.clone()) {
+                                    plan = Some(pl);
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -349,7 +359,9 @@ impl SessionHistory {
         workers.sort_by(|a, b| {
             let role_a = crate::storage::role_name(a.session.role);
             let role_b = crate::storage::role_name(b.session.role);
-            role_a.cmp(role_b).then_with(|| a.session.name.cmp(&b.session.name))
+            role_a
+                .cmp(role_b)
+                .then_with(|| a.session.name.cmp(&b.session.name))
         });
 
         Ok(workers)
@@ -374,27 +386,59 @@ impl SessionHistory {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                 let entry = match val.get("type").and_then(|v| v.as_str()) {
                     Some("event") => {
-                        let worker_id = val.get("worker_id")
+                        let worker_id = val
+                            .get("worker_id")
                             .and_then(|v| v.as_str())
                             .and_then(|s| Uuid::parse_str(s).ok());
                         Some(ReplayEntry {
-                            created_at: val.get("created_at").and_then(|v| serde_json::from_value(v.clone()).ok())
+                            created_at: val
+                                .get("created_at")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
                                 .unwrap_or_else(|| chrono::Utc::now()),
-                            lane: format!("event:{}", worker_id.map(|id| id.to_string()).unwrap_or_else(|| "mission".to_owned())),
-                            kind: val.get("event_type").and_then(|v| v.as_str()).unwrap_or("unknown").to_owned(),
-                            body: val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            lane: format!(
+                                "event:{}",
+                                worker_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "mission".to_owned())
+                            ),
+                            kind: val
+                                .get("event_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_owned(),
+                            body: val
+                                .get("body")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
                         })
                     }
                     Some("summary") => {
-                        let worker_id = val.get("worker_id")
+                        let worker_id = val
+                            .get("worker_id")
                             .and_then(|v| v.as_str())
                             .and_then(|s| Uuid::parse_str(s).ok());
                         Some(ReplayEntry {
-                            created_at: val.get("created_at").and_then(|v| serde_json::from_value(v.clone()).ok())
+                            created_at: val
+                                .get("created_at")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
                                 .unwrap_or_else(|| chrono::Utc::now()),
-                            lane: format!("summary:{}", worker_id.map(|id| id.to_string()).unwrap_or_else(|| "mission".to_owned())),
-                            kind: val.get("summary_type").and_then(|v| v.as_str()).unwrap_or("summary").to_owned(),
-                            body: val.get("content").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            lane: format!(
+                                "summary:{}",
+                                worker_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "mission".to_owned())
+                            ),
+                            kind: val
+                                .get("summary_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("summary")
+                                .to_owned(),
+                            body: val
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
                         })
                     }
                     _ => None,
@@ -429,12 +473,14 @@ impl SessionHistory {
         for line in reader.lines() {
             let line = line?;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                let matches_worker = val.get("worker_id")
+                let matches_worker = val
+                    .get("worker_id")
                     .and_then(|v| v.as_str())
                     .map_or(false, |s| s == &worker_id.to_string())
-                    || val.get("id")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |s| s == &worker_id.to_string());
+                    || val
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |s| s == &worker_id.to_string());
 
                 if !matches_worker {
                     continue;
@@ -442,18 +488,38 @@ impl SessionHistory {
 
                 let entry = match val.get("type").and_then(|v| v.as_str()) {
                     Some("event") => Some(ReplayEntry {
-                        created_at: val.get("created_at").and_then(|v| serde_json::from_value(v.clone()).ok())
+                        created_at: val
+                            .get("created_at")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
                             .unwrap_or_else(|| chrono::Utc::now()),
                         lane: "event".to_owned(),
-                        kind: val.get("event_type").and_then(|v| v.as_str()).unwrap_or("unknown").to_owned(),
-                        body: val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                        kind: val
+                            .get("event_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        body: val
+                            .get("body")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
                     }),
                     Some("summary") => Some(ReplayEntry {
-                        created_at: val.get("created_at").and_then(|v| serde_json::from_value(v.clone()).ok())
+                        created_at: val
+                            .get("created_at")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
                             .unwrap_or_else(|| chrono::Utc::now()),
                         lane: "summary".to_owned(),
-                        kind: val.get("summary_type").and_then(|v| v.as_str()).unwrap_or("summary").to_owned(),
-                        body: val.get("content").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                        kind: val
+                            .get("summary_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("summary")
+                            .to_owned(),
+                        body: val
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
                     }),
                     _ => None,
                 };
@@ -484,8 +550,18 @@ impl SessionHistory {
                 if val.get("type").and_then(|v| v.as_str()) == Some("summary") {
                     // Check if it's a supervisor summary (worker_id is null or supervisor-related)
                     let is_supervisor = val.get("worker_id").is_none()
-                        || val.get("summary_type").and_then(|v| v.as_str())
-                            .map_or(false, |t| matches!(t, "final_synthesis" | "mission_complete" | "supervisor_notice" | "supervisor_action"));
+                        || val
+                            .get("summary_type")
+                            .and_then(|v| v.as_str())
+                            .map_or(false, |t| {
+                                matches!(
+                                    t,
+                                    "final_synthesis"
+                                        | "mission_complete"
+                                        | "supervisor_notice"
+                                        | "supervisor_action"
+                                )
+                            });
 
                     if is_supervisor {
                         if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
@@ -532,11 +608,13 @@ impl SessionHistory {
                     let line = line?;
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                         if val.get("type").and_then(|v| v.as_str()) == Some("summary") {
-                            let wid = val.get("worker_id")
+                            let wid = val
+                                .get("worker_id")
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| Uuid::parse_str(s).ok());
                             if wid == Some(*worker_id) {
-                                let created = val.get("created_at")
+                                let created = val
+                                    .get("created_at")
                                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                                     .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::MIN_UTC);
                                 if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
@@ -548,14 +626,20 @@ impl SessionHistory {
                         }
                         // Also check worker updates
                         if val.get("type").and_then(|v| v.as_str()) == Some("worker_update") {
-                            let wid = val.get("worker_id")
+                            let wid = val
+                                .get("worker_id")
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| Uuid::parse_str(s).ok());
-                            if wid == Some(*worker_id) && val.get("field").and_then(|v| v.as_str()) == Some("last_summary") {
+                            if wid == Some(*worker_id)
+                                && val.get("field").and_then(|v| v.as_str()) == Some("last_summary")
+                            {
                                 if let Some(content) = val.get("value").and_then(|v| v.as_str()) {
-                                    let created = val.get("created_at")
+                                    let created = val
+                                        .get("created_at")
                                         .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                                        .unwrap_or_else(|| {
+                                            chrono::DateTime::<chrono::Utc>::MIN_UTC
+                                        });
                                     if latest.is_none() || created > latest.as_ref().unwrap().0 {
                                         latest = Some((created, content.to_owned()));
                                     }
@@ -576,10 +660,7 @@ impl SessionHistory {
         let dir = self.mission_dir(mission_id);
         std::fs::create_dir_all(&dir)?;
         let file = self.mission_file(mission_id);
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(&file)?;
         writeln!(f, "{}", serde_json::to_string(line)?)?;
         Ok(())
     }
@@ -696,7 +777,9 @@ impl HistoryIndex {
         let repo_str = repo_path.to_string_lossy();
         Ok(all
             .into_iter()
-            .filter(|item| item.repo_path.to_string_lossy() == repo_str && item.created_at >= not_before)
+            .filter(|item| {
+                item.repo_path.to_string_lossy() == repo_str && item.created_at >= not_before
+            })
             .next())
     }
 }
@@ -729,7 +812,8 @@ impl MissionRecordFromJson {
             worker_agent: AgentKind::Qwen, // Not stored in JSONL, default
             supervisor_agent: AgentKind::Qwen,
             worker_count: 0,
-            status: self.status
+            status: self
+                .status
                 .and_then(|s| MissionStatus::from_str(&s).ok())
                 .unwrap_or(MissionStatus::Running),
             final_summary: self.final_summary,
@@ -739,7 +823,8 @@ impl MissionRecordFromJson {
 
 fn parse_worker_from_json(val: serde_json::Value) -> Result<WorkerSnapshot> {
     let id = Uuid::parse_str(val["id"].as_str().unwrap_or_default()).unwrap_or_default();
-    let mission_id = Uuid::parse_str(val["mission_id"].as_str().unwrap_or_default()).unwrap_or_default();
+    let mission_id =
+        Uuid::parse_str(val["mission_id"].as_str().unwrap_or_default()).unwrap_or_default();
     let role_str = val["role"].as_str().unwrap_or("worker");
     let role = crate::storage::parse_role(role_str).unwrap_or(SessionRole::Worker);
     let status_str = val["status"].as_str().unwrap_or("progressing");
@@ -748,7 +833,9 @@ fn parse_worker_from_json(val: serde_json::Value) -> Result<WorkerSnapshot> {
     let agent = AgentKind::from_str(agent_str).unwrap_or(AgentKind::Qwen);
 
     let launch_command = if let Some(arr) = val.get("launch_command").and_then(|v| v.as_array()) {
-        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
     } else {
         vec![agent.as_str().to_owned()]
     };
@@ -772,7 +859,10 @@ fn parse_worker_from_json(val: serde_json::Value) -> Result<WorkerSnapshot> {
             status,
             launch_command,
             last_heartbeat_at: chrono::Utc::now(),
-            last_summary: val.get("last_summary").and_then(|v| v.as_str()).map(String::from),
+            last_summary: val
+                .get("last_summary")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         },
         packet,
     })

@@ -1,60 +1,119 @@
+//! TUI widgets — restrained palette, status dots, line builders.
+#![allow(dead_code)]
+
+use super::state::AgentStatus;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::internal::ui::theme::theme_main::SapphireTheme;
+pub const PURPLE: Color = Color::Rgb(99, 102, 241);
+pub const PURPLE_SOFT: Color = Color::Rgb(165, 180, 252);
+pub const GREEN: Color = Color::Rgb(34, 197, 94);
+pub const GREEN_SOFT: Color = Color::Rgb(74, 222, 128);
+pub const RED: Color = Color::Rgb(239, 68, 68);
+pub const YELLOW: Color = Color::Rgb(245, 158, 11);
+pub const WHITE: Color = Color::Rgb(248, 250, 252);
+pub const GRAY: Color = Color::Rgb(148, 163, 184);
+pub const DARK: Color = Color::Rgb(100, 116, 139);
+pub const BORDER: Color = Color::Rgb(71, 85, 105);
 
-pub fn badge(theme: &SapphireTheme, label: &str, status: &str) -> Line<'static> {
-    let (dot, dot_style) = theme.state_dot(status);
-    Line::from(vec![
-        Span::styled(dot.to_owned(), dot_style),
-        Span::raw(" "),
-        Span::styled(label.to_owned(), theme.badge_style(status)),
-    ])
-}
+// ─── Status Dots ──────────────────────────────────────────────────────────
 
-pub fn key_value(theme: &SapphireTheme, label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label}: "), theme.key_value_label()),
-        Span::styled(value.to_owned(), theme.key_value_value()),
-    ])
-}
-
-pub fn truncate_line(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        value.to_owned()
-    } else {
-        value.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+pub fn status_dot(status: AgentStatus) -> (&'static str, Color) {
+    match status {
+        AgentStatus::Progressing | AgentStatus::Booting => ("●", GREEN),
+        AgentStatus::Validated => ("●", GREEN),
+        AgentStatus::Blocked | AgentStatus::Stalled => ("●", YELLOW),
+        AgentStatus::Failed | AgentStatus::Exited => ("●", RED),
+        AgentStatus::Contradictory | AgentStatus::WrongDirection => ("●", RED),
+        AgentStatus::DoneClaimed => ("●", GREEN_SOFT),
+        AgentStatus::NeedsValidation => ("●", PURPLE),
+        AgentStatus::WeakOutput | AgentStatus::NeedsRetry => ("●", PURPLE_SOFT),
+        AgentStatus::NotStarted => ("○", GRAY),
     }
 }
 
-pub fn section_header(theme: &SapphireTheme, title: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("## ", theme.surfaces.panel.rule),
-        Span::styled(title.to_owned(), theme.surfaces.panel.title),
-    ])
+pub fn status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Booting => "boot",
+        AgentStatus::NotStarted => "queued",
+        AgentStatus::Progressing => "running",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Stalled => "stalled",
+        AgentStatus::DoneClaimed => "done_claimed",
+        AgentStatus::NeedsValidation => "reviewing",
+        AgentStatus::WeakOutput => "weak",
+        AgentStatus::WrongDirection => "drift",
+        AgentStatus::Contradictory => "conflict",
+        AgentStatus::NeedsRetry => "retry",
+        AgentStatus::Validated => "done",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Exited => "exited",
+    }
 }
 
-pub fn muted_line(theme: &SapphireTheme, text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(text.into(), theme.surfaces.panel.dimmed))
+pub fn status_color(status: AgentStatus) -> Color {
+    status_dot(status).1
 }
 
-pub fn bullet_line(
-    theme: &SapphireTheme,
-    bullet: &str,
-    label: impl Into<String>,
-    value: impl Into<String>,
-) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(bullet.to_owned(), theme.surfaces.panel.accent),
-        Span::raw(" "),
-        Span::styled(label.into(), theme.surfaces.panel.title),
-        Span::raw(" "),
-        Span::styled(value.into(), theme.surfaces.panel.body),
-    ])
+// ─── Line Builders ────────────────────────────────────────────────────────
+
+pub fn muted(text: &str) -> Line<'static> {
+    Line::from(Span::styled(text.to_owned(), Style::default().fg(GRAY)))
 }
 
-pub fn rule_line(theme: &SapphireTheme, width: usize) -> Line<'static> {
+pub fn accent(text: &str) -> Line<'static> {
     Line::from(Span::styled(
-        "─".repeat(width.max(8)),
-        theme.surfaces.panel.rule,
+        text.to_owned(),
+        Style::default().fg(PURPLE).add_modifier(Modifier::BOLD),
     ))
+}
+
+pub fn section_title(title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            title.to_owned(),
+            Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default().fg(DARK)),
+        Span::styled("────────────────", Style::default().fg(BORDER)),
+    ])
+}
+
+pub fn kv(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(DARK)),
+        Span::styled(value.to_owned(), Style::default().fg(WHITE)),
+    ])
+}
+
+pub fn kv_green(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(DARK)),
+        Span::styled(value.to_owned(), Style::default().fg(GREEN)),
+    ])
+}
+
+pub fn kv_yellow(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(DARK)),
+        Span::styled(value.to_owned(), Style::default().fg(YELLOW)),
+    ])
+}
+
+pub fn kv_red(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(DARK)),
+        Span::styled(
+            value.to_owned(),
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+pub fn truncate(v: &str, max: usize) -> String {
+    if v.chars().count() <= max {
+        v.to_owned()
+    } else {
+        v.chars().take(max.saturating_sub(1)).collect::<String>() + ".."
+    }
 }

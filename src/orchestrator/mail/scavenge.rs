@@ -8,7 +8,10 @@ use crate::store::Store;
 /// Result of attempting to claim a scavenge message.
 pub enum ClaimResult {
     Claimed,
-    AlreadyClaimed { claimed_by: String, claimed_at: String },
+    AlreadyClaimed {
+        claimed_by: String,
+        claimed_at: String,
+    },
     NotFound,
 }
 
@@ -26,7 +29,10 @@ pub fn attempt_scavenge_claim(
         if let Some(body) = store.get_mail_body(scavenge_mail_id)? {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             if let Some(cb) = parsed.get("claimed_by").and_then(|v| v.as_str()) {
-                let ca = parsed.get("claimed_at").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let ca = parsed
+                    .get("claimed_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 return Ok(ClaimResult::AlreadyClaimed {
                     claimed_by: cb.to_owned(),
                     claimed_at: ca.to_owned(),

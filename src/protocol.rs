@@ -240,7 +240,10 @@ fn mail_looks_like_prompt_example(directive: &MailDirective) -> bool {
             .map(looks_like_placeholder_text)
             .unwrap_or(false)
         || looks_like_placeholder_text(&directive.to)
-        || directive.cc.iter().any(|value| looks_like_placeholder_text(value))
+        || directive
+            .cc
+            .iter()
+            .any(|value| looks_like_placeholder_text(value))
         || looks_like_placeholder_text(&directive.message_type)
         || looks_like_placeholder_text(&directive.priority)
         || looks_like_placeholder_text(&directive.subject)

@@ -30,7 +30,8 @@ impl TranscriptStore {
 
     pub fn transcript_file(&self, mission_id: &str, worker_name: &str, index: u64) -> PathBuf {
         if index == 0 {
-            self.mission_dir(mission_id).join(format!("{}.log", worker_name))
+            self.mission_dir(mission_id)
+                .join(format!("{}.log", worker_name))
         } else {
             self.mission_dir(mission_id)
                 .join(format!("{}.log.{}", worker_name, index))
@@ -94,8 +95,8 @@ impl TranscriptStore {
             return Ok(0);
         }
 
-        let cutoff = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(max_age_days * 24 * 3600);
+        let cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(max_age_days * 24 * 3600);
         let mut count = 0;
 
         for entry in fs::read_dir(&self.base_dir)? {
@@ -145,7 +146,9 @@ impl TranscriptWriter<'_> {
         if self.current_size >= self.max_size {
             self.file.flush()?;
             self.index += 1;
-            let new_file = self.store.transcript_file(&self.mission_id, &self.worker_name, self.index);
+            let new_file =
+                self.store
+                    .transcript_file(&self.mission_id, &self.worker_name, self.index);
             let f = fs::OpenOptions::new()
                 .create(true)
                 .append(true)

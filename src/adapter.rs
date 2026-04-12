@@ -56,13 +56,27 @@ impl SupervisorEventType {
     /// Each rule is the single relevant instruction the supervisor needs for this event.
     pub fn injected_rule(self) -> &'static str {
         match self {
-            Self::Stall => "STALLED WORKER RULE: Send a corrective prompt immediately. Force concrete next steps. If repeated, use retry_worker or redirect_worker. Never ignore a stall.",
-            Self::DoneClaimed => "DONE CLAIM RULE: Never accept claims without proof. Demand exact files changed, commands run, results observed, remaining risk, and overlap report. Reject vague completions.",
-            Self::WeakOutput => "WEAK OUTPUT RULE: Ask sharper follow-ups. Demand evidence. Narrow the task again. Do not accept cosmetic or generic progress.",
-            Self::Contradiction => "CONTRADICTION RULE: Identify the exact collision. Determine ownership. Preserve the better/newer/more-validated work. Redirect the losing worker.",
-            Self::Blocked => "BLOCKED WORKER RULE: Identify the exact blocker. Determine whether clarification, rerouting, or dependency resolution is needed. Do not let a worker sit blocked.",
-            Self::Failed => "FAILED WORKER RULE: Preserve useful partials. Reassign or continue around the failure. Do not treat failure as total loss.",
-            Self::Notice => "SUPERVISION RULE: Stay active. Monitor all workers. Catch drift, overlap, and fake completion. Maximize throughput, not noise.",
+            Self::Stall => {
+                "STALLED WORKER RULE: Send a corrective prompt immediately. Force concrete next steps. If repeated, use retry_worker or redirect_worker. Never ignore a stall."
+            }
+            Self::DoneClaimed => {
+                "DONE CLAIM RULE: Never accept claims without proof. Demand exact files changed, commands run, results observed, remaining risk, and overlap report. Reject vague completions."
+            }
+            Self::WeakOutput => {
+                "WEAK OUTPUT RULE: Ask sharper follow-ups. Demand evidence. Narrow the task again. Do not accept cosmetic or generic progress."
+            }
+            Self::Contradiction => {
+                "CONTRADICTION RULE: Identify the exact collision. Determine ownership. Preserve the better/newer/more-validated work. Redirect the losing worker."
+            }
+            Self::Blocked => {
+                "BLOCKED WORKER RULE: Identify the exact blocker. Determine whether clarification, rerouting, or dependency resolution is needed. Do not let a worker sit blocked."
+            }
+            Self::Failed => {
+                "FAILED WORKER RULE: Preserve useful partials. Reassign or continue around the failure. Do not treat failure as total loss."
+            }
+            Self::Notice => {
+                "SUPERVISION RULE: Stay active. Monitor all workers. Catch drift, overlap, and fake completion. Maximize throughput, not noise."
+            }
         }
     }
 
@@ -142,6 +156,8 @@ pub struct FinalEnvelope {
     pub ready_for_cleanup: bool,
     /// Summary of final result
     pub summary: String,
+    /// Optional structured markdown report for mission replay.
+    pub report_markdown: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -167,15 +183,15 @@ pub trait CliAdapter: Send + Sync {
 
     fn detect_done_claim(&self, raw_output: &str) -> bool;
 
-    fn build_supervisor_plan_prompt(
-        &self,
-        mission: &str,
-        worker_count: usize,
-    ) -> String;
+    fn build_supervisor_plan_prompt(&self, mission: &str, worker_count: usize) -> String;
 
     fn extract_supervisor_plan(&self, raw_output: &str) -> Option<MissionPlan>;
 
-    fn build_supervisor_action_prompt(&self, event_type: SupervisorEventType, context: &str) -> String;
+    fn build_supervisor_action_prompt(
+        &self,
+        event_type: SupervisorEventType,
+        context: &str,
+    ) -> String;
 
     fn extract_supervisor_action(&self, raw_output: &str) -> Option<SupervisorAction>;
 
@@ -238,11 +254,7 @@ macro_rules! impl_standard_adapter {
                 detect_done_claim_impl(raw_output)
             }
 
-            fn build_supervisor_plan_prompt(
-                &self,
-                mission: &str,
-                worker_count: usize,
-            ) -> String {
+            fn build_supervisor_plan_prompt(&self, mission: &str, worker_count: usize) -> String {
                 build_supervisor_plan_prompt_impl(mission, worker_count)
             }
 
@@ -299,7 +311,9 @@ fn build_validation_prompt_impl(message: &str) -> String {
 }
 
 fn build_correction_prompt_impl(reason: &str) -> String {
-    let lead = format!("Your last reply did not follow the required status format: {reason}\nDo not continue broad explanation.");
+    let lead = format!(
+        "Your last reply did not follow the required status format: {reason}\nDo not continue broad explanation."
+    );
     format!("{lead}\nReply only with:\n{}", status_envelope_contract())
 }
 
@@ -308,95 +322,21 @@ fn build_status_prompt_impl(reason: &str) -> String {
     format!("{tail}\n{}", status_envelope_contract())
 }
 
-fn build_supervisor_plan_prompt_impl(
-    mission: &str,
-    worker_count: usize,
-) -> String {
-    format!(
-        "You are the supervisor. You will receive a multi-step mission. Your ONLY job is to \
-        decompose it into {worker_count} GENUINELY DIFFERENT sub-tasks — each with a distinct \
-        role, file scope, starting angle, explicit task, and success criteria.\n\
-        \n\
-        CRITICAL RULE — TASK DECOMPOSITION (the #1 failure mode):\n\
-        - You MUST give every worker a DIFFERENT explicit_task. No two workers do the same thing.\n\
-        - You MUST give every worker a DIFFERENT owned_scope. No two workers touch the same files.\n\
-        - You MUST give every worker a DIFFERENT starting_angle. Each enters from a different entry point.\n\
-        - If the mission has multiple steps, you MUST split them across workers — NOT copy all steps to every worker.\n\
-        - Each worker handles ONE slice of the work, not the entire mission.\n\
-        - If you copy-paste the same task to all workers, the mission FAILS immediately.\n\
-        \n\
-        WHAT GOOD DECOMPOSITION LOOKS LIKE (8 workers for \"build a calculator\"):\n\
-        Worker 1 (Engineer-1, software-engineer): Build the expression PARSER — tokenizes input, \
-          builds AST, handles operator precedence. Files: src/parser/, src/tokenizer.rs\n\
-        Worker 2 (Engineer-2, software-engineer): Build the evaluation ENGINE — walks AST, computes \
-          results, handles errors. Files: src/engine/, src/evaluator.rs\n\
-        Worker 3 (Engineer-3, software-engineer): Build the CLI REPL — reads stdin, calls engine, \
-          displays output, handles quit. Files: src/cli/, src/main.rs\n\
-        Worker 4 (QA-1, testing-and-automation-engineer): Write comprehensive tests for parser, \
-          engine, CLI. Files: tests/parser_tests.rs, tests/engine_tests.rs\n\
-        Worker 5 (Security-1, security-engineer): Security audit of parser — injection vectors, \
-          overflow attacks, edge cases. Files: threat-model.md only\n\
-        Worker 6 (Architect-1, architecture-engineer): Architecture review — module boundaries, \
-          API contracts, extensibility. Files: architecture-review.md only\n\
-        Worker 7 (Designer-1, designer-engineer): UX design — error messages, help system, \
-          output formatting. Files: ux-design.md only\n\
-        Worker 8 (Product-1, product-engineer): Product spec — user stories, acceptance criteria, \
-          MVP scope. Files: product-spec.md only\n\
-        \n\
-        WHAT FAILURE LOOKS LIKE (plan will be REJECTED):\n\
-        - All 8 workers get \"build a calculator\" → REJECTED (same task to everyone)\n\
-        - All 8 workers get src/ as their scope → REJECTED (same files)\n\
-        - Workers have slightly reworded versions of the same task → REJECTED\n\
-        \n\
-        OUTPUT FORMAT — EXACTLY THIS, NOTHING ELSE:\n\
-        BEGIN_SAPPHIRE_PLAN_JSON\n\
-        <valid JSON object>\n\
-        END_SAPPHIRE_PLAN_JSON\n\
-        \n\
-        HARD RULES (violate any = plan rejected):\n\
-        1. Raw JSON only between the markers. No markdown fences. No prose before BEGIN or after END.\n\
-        2. EXACTLY {worker_count} worker_packets. Not one more. Not one less.\n\
-        3. role_type must be one of: software-engineer, research-engineer, validation-engineer, architecture-engineer, security-engineer, debug-and-review-engineer, testing-and-automation-engineer, designer-engineer, sales-engineer, solutions-engineer, customer-success-engineer, product-engineer, product-manager, revenue-engineer, compliance-engineer\n\
-        4. display_name uses function-first naming: Engineer-N, QA-N, Security-N, Architect-N, Designer-N, Product-N, Validator-N, Reviewer-N, Researcher-N, etc.\n\
-        5. execution must be one of: parallel, dependent, validation, integration\n\
-        6. Every JSON field must be present. No missing fields. No nulls.\n\
-        7. Arrays must be arrays (e.g. definition_of_done is [\"item1\", \"item2\"]), never a string.\n\
-        8. JSON must be valid. No trailing commas. No single quotes. No unescaped newlines in strings.\n\
-        9. String values must be concise (20 words or fewer each).\n\
-        \n\
-        STRUCTURE EXAMPLE (this shows the SHAPE, not the content — analyze YOUR mission and produce genuinely different tasks):\n\
-        BEGIN_SAPPHIRE_PLAN_JSON\n\
-        {{\n  \"mission_rewrite\": \"Build a calculator with parser, engine, CLI, tests, security audit, architecture review, UX design, and product spec\",\n  \
-        \"team_activation\": [\n    {{\"role_type\": \"software-engineer\", \"display_name\": \"Engineer-1\", \"reason\": \"Parser implementation\"}},\n    {{\"role_type\": \"software-engineer\", \"display_name\": \"Engineer-2\", \"reason\": \"Evaluation engine\"}},\n    {{\"role_type\": \"testing-and-automation-engineer\", \"display_name\": \"QA-1\", \"reason\": \"Test coverage\"}}\n  ],\n  \
-        \"workstreams\": [\n    {{\"id\": \"ws-1\", \"name\": \"Expression parser\", \"execution\": \"parallel\", \"owned_scope\": \"src/parser/\", \"success_criteria\": [\"Parses expressions with correct precedence\"], \"depends_on\": []}},\n    {{\"id\": \"ws-2\", \"name\": \"Evaluation engine\", \"execution\": \"dependent\", \"owned_scope\": \"src/engine/\", \"success_criteria\": [\"Evaluates parsed expressions\"], \"depends_on\": [\"ws-1\"]}},\n    {{\"id\": \"ws-3\", \"name\": \"Test coverage\", \"execution\": \"validation\", \"owned_scope\": \"tests/\", \"success_criteria\": [\"90% coverage\"], \"depends_on\": [\"ws-1\", \"ws-2\"]}}\n  ],\n  \
-        \"risk_map\": [\n    {{\"zone\": \"API contract\", \"risk\": \"Engine and parser disagree on input/output format\", \"mitigation\": \"Define API contract before either worker starts\"}}\n  ],\n  \
-        \"worker_packets\": [\n    {{\"worker_id\": \"Engineer-1\", \"role\": \"Software Engineer\", \"role_type\": \"software-engineer\", \"display_name\": \"Engineer-1\", \"starting_angle\": \"Own the parser. Start with tokenization, then AST, then precedence.\", \"owned_scope\": \"src/parser/, src/tokenizer.rs\", \"explicit_task\": \"Build the expression parser: tokenize input, build AST, handle operator precedence and parenthesized expressions.\", \"out_of_scope\": \"Do not implement evaluation, CLI, tests, or documentation.\", \"definition_of_done\": [\"Parser handles all operators\", \"Clear errors for invalid input\"], \"required_evidence\": [\"Unit tests for each operator\", \"Error output for bad input\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Claim files before editing. Do not touch src/engine/ or tests/.\", \"communication_rules\": [\"Mail Engineer-2 if the AST shape affects the evaluator.\"], \"validation_standard\": [\"All parser tests pass\"], \"expected_output_format\": [\"Parser API summary\"]}},\n    {{\"worker_id\": \"Engineer-2\", \"role\": \"Software Engineer\", \"role_type\": \"software-engineer\", \"display_name\": \"Engineer-2\", \"starting_angle\": \"Own the evaluator. Start with the AST walk algorithm.\", \"owned_scope\": \"src/engine/, src/evaluator.rs\", \"explicit_task\": \"Build the evaluation engine: walk the AST from the parser, compute results, handle division by zero and overflow errors.\", \"out_of_scope\": \"Do not implement parsing, CLI, tests, or documentation. Call the parser API only.\", \"definition_of_done\": [\"Engine evaluates any valid expression\", \"Clear errors for invalid cases\"], \"required_evidence\": [\"Tests for basic arithmetic\", \"Error output for edge cases\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Claim files before editing. Do not touch src/parser/ or tests/.\", \"communication_rules\": [\"Mail Engineer-1 if the AST shape is unclear.\"], \"validation_standard\": [\"All engine tests pass\"], \"expected_output_format\": [\"Engine API summary\"]}},\n    {{\"worker_id\": \"QA-1\", \"role\": \"Testing & Automation Engineer\", \"role_type\": \"testing-and-automation-engineer\", \"display_name\": \"QA-1\", \"starting_angle\": \"Build the test harness. Start with engine tests, then parser tests.\", \"owned_scope\": \"tests/parser_tests.rs, tests/engine_tests.rs\", \"explicit_task\": \"Write comprehensive tests for the parser and engine: unit tests, edge cases, property-based tests for arithmetic laws.\", \"out_of_scope\": \"Do not implement parser, engine, CLI, or documentation. Write tests only.\", \"definition_of_done\": [\"90% coverage on parser and engine\", \"All edge cases tested\"], \"required_evidence\": [\"Coverage report\", \"At least 20 test cases\"], \"blocker_protocol\": \"Report blockers with exact error and file path.\", \"conflict_warning\": \"Do not modify src/ code. Write tests against public API only.\", \"communication_rules\": [\"Mail Engineer-1 if a test reveals a parser bug.\"], \"validation_standard\": [\"All tests pass on clean checkout\"], \"expected_output_format\": [\"Coverage report with per-module breakdown\"]}}\n  ],\n  \
-        \"supervision_strategy\": \"Parser first, then engine, then tests in parallel. QA validates both.\"\n}}\n\
-        END_SAPPHIRE_PLAN_JSON\n\
-        \n\
-        REMEMBER: Analyze the mission below. Split it into {worker_count} genuinely different pieces.\n\
-        If you give the same task to multiple workers, the plan will be REJECTED.\n\
-        If your workstreams have identical scopes, the plan will be REJECTED.\n\
-        Each worker gets ONE slice — not the whole mission.\n\
-        \n\
-        Mission: {mission}"
-    )
+fn build_supervisor_plan_prompt_impl(mission: &str, worker_count: usize) -> String {
+    crate::orchestrator::planning::prompt::build_supervisor_plan_prompt(mission, worker_count)
 }
 
-fn build_supervisor_action_prompt_impl(
-    event_type: SupervisorEventType,
-    context: &str,
-) -> String {
+fn build_supervisor_action_prompt_impl(event_type: SupervisorEventType, context: &str) -> String {
     let lead = "Supervisor intervention required.";
     let rule = event_type.injected_rule();
 
     format!(
-        "{lead}\n\n{rule}\n\nDecision discipline:\n- Treat fresh .sp/.hide.sp worker status JSON as authoritative.\n- Do not call a worker stalled if it has a fresh status update.\n- Do not repeat the same action unless the worker produced a NEW status update after your last action.\n- If the workers already finished the task, stop issuing worker actions and move to final synthesis.\n- Keep one target per reply. No multi-action prose.\n\nIssue:\n{context}\n\nReply with four lines in this order.\nAllowed ACTION values: observe, validate_worker, retry_worker, redirect_worker, message_worker, accept_worker, fail_worker.\nTARGET must be a worker display name or NONE.\nSUMMARY must be one short sentence.\nMESSAGE must be one short instruction or NONE.\nFields:\nACTION:\nTARGET:\nSUMMARY:\nMESSAGE:"
+        "{lead}\n\n{rule}\n\nDecision discipline:\n- Treat fresh .sp worker status JSON as authoritative.\n- Do not call a worker stalled if it has a fresh status update.\n- Do not repeat the same action unless the worker produced a NEW status update after your last action.\n- If the workers already finished the task, stop issuing worker actions and move to final synthesis.\n- Keep one target per reply. No multi-action prose.\n\nIssue:\n{context}\n\nReply with four lines in this order.\nAllowed ACTION values: observe, validate_worker, retry_worker, redirect_worker, message_worker, accept_worker, fail_worker.\nTARGET must be a worker display name or NONE.\nSUMMARY must be one short sentence.\nMESSAGE must be one short instruction or NONE.\nFields:\nACTION:\nTARGET:\nSUMMARY:\nMESSAGE:"
     )
 }
 
 fn build_final_summary_prompt_impl() -> String {
-    "All workers are terminal. Stop issuing worker actions. Produce the final concise synthesis of what happened, how the workers coordinated, and the final result.\nReply only with:\nFINAL_STATE: validated or failed\nFINAL_SUMMARY: one concise paragraph".to_owned()
+    "All workers are terminal. Stop issuing worker actions. Close the mission now.\nReply exactly with:\nFINAL_STATE: validated or failed\nREADY_FOR_CLEANUP: yes\nFINAL_SUMMARY: one concise sentence\nBEGIN_FINAL_REPORT_MD\n## Mission Outcome\n- Result: ...\n- Team: ...\n- Risks: ...\nEND_FINAL_REPORT_MD".to_owned()
 }
 
 // ─── Shared keyword lists for heuristic state detection ───────────────────────
@@ -725,7 +665,7 @@ fn extract_supervisor_plan_impl(raw_output: &str) -> Option<MissionPlan> {
     )
     .or_else(|| extract_fenced_json(raw_output))
     .or_else(|| extract_plan_like_json(raw_output))?;
-    let envelope = serde_json::from_str::<SupervisorPlanEnvelope>(&json).ok()?;
+    let envelope = parse_supervisor_plan_envelope(&json)?;
     let plan = envelope.try_into_plan().ok()?;
     let plan = sanitize_supervisor_plan(plan);
     // Strict differentiation: reject if worker packets are too similar
@@ -766,11 +706,17 @@ fn text_similarity(a: &str, b: &str) -> f64 {
     let b_lower = b.to_ascii_lowercase();
     let words_a: std::collections::HashSet<_> = a_lower.split_whitespace().collect();
     let words_b: std::collections::HashSet<_> = b_lower.split_whitespace().collect();
-    if words_a.is_empty() && words_b.is_empty() { return 1.0; }
-    if words_a.is_empty() || words_b.is_empty() { return 0.0; }
+    if words_a.is_empty() && words_b.is_empty() {
+        return 1.0;
+    }
+    if words_a.is_empty() || words_b.is_empty() {
+        return 0.0;
+    }
     let intersection = words_a.intersection(&words_b).count();
     let union = words_a.union(&words_b).count();
-    if union == 0 { return 0.0; }
+    if union == 0 {
+        return 0.0;
+    }
     intersection as f64 / union as f64
 }
 
@@ -800,12 +746,21 @@ fn extract_final_envelope_impl(raw_output: &str) -> Option<FinalEnvelope> {
     let state = map_state_token(captures.name("state")?.as_str())?;
     let ready_for_cleanup = captures
         .name("cleanup")
-        .map(|v| matches!(v.as_str().trim().to_ascii_lowercase().as_str(), "yes" | "true"))
+        .map(|v| {
+            matches!(
+                v.as_str().trim().to_ascii_lowercase().as_str(),
+                "yes" | "true"
+            )
+        })
         .unwrap_or(false);
     Some(FinalEnvelope {
         state,
         ready_for_cleanup,
         summary: captures.name("summary")?.as_str().trim().to_owned(),
+        report_markdown: captures
+            .name("report")
+            .map(|value| value.as_str().trim().to_owned())
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -955,6 +910,78 @@ pub(crate) fn extract_plan_like_json(text: &str) -> Option<String> {
     None
 }
 
+fn parse_supervisor_plan_envelope(json: &str) -> Option<SupervisorPlanEnvelope> {
+    serde_json::from_str::<SupervisorPlanEnvelope>(json)
+        .ok()
+        .or_else(|| {
+            let repaired = repair_supervisor_plan_json(json);
+            serde_json::from_str::<SupervisorPlanEnvelope>(&repaired).ok()
+        })
+        .or_else(|| {
+            let repaired = repair_supervisor_plan_json(json);
+            let value = serde_json::from_str::<serde_json::Value>(&repaired).ok()?;
+            let nested = value
+                .get("plan")
+                .cloned()
+                .or_else(|| value.get("data").cloned())?;
+            serde_json::from_value::<SupervisorPlanEnvelope>(nested).ok()
+        })
+}
+
+fn repair_supervisor_plan_json(json: &str) -> String {
+    let normalized = json
+        .replace('\u{201c}', "\"")
+        .replace('\u{201d}', "\"")
+        .replace('\u{2018}', "'")
+        .replace('\u{2019}', "'");
+    let mut out = String::with_capacity(normalized.len());
+    let mut chars = normalized.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            ',' => {
+                let mut lookahead = chars.clone();
+                let mut should_skip = false;
+                while let Some(next) = lookahead.next() {
+                    if next.is_whitespace() {
+                        continue;
+                    }
+                    if next == '}' || next == ']' {
+                        should_skip = true;
+                    }
+                    break;
+                }
+                if !should_skip {
+                    out.push(ch);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
@@ -1045,7 +1072,9 @@ fn supervisor_action_regex() -> &'static Regex {
 fn final_envelope_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"(?ms)FINAL_STATE:\s*(?P<state>[^\n]+)\nFINAL_SUMMARY:\s*(?P<summary>[^\n]+)")
+        Regex::new(
+            r"(?ms)FINAL_STATE:\s*(?P<state>[^\n]+)\n(?:READY_FOR_CLEANUP:\s*(?P<cleanup>[^\n]+)\n)?FINAL_SUMMARY:\s*(?P<summary>[^\n]+)(?:\nBEGIN_FINAL_REPORT_MD\n(?P<report>.*?)\nEND_FINAL_REPORT_MD)?",
+        )
             .expect("valid final envelope regex")
     })
 }
@@ -1060,9 +1089,12 @@ fn fenced_json_regex() -> &'static Regex {
 #[derive(Debug, Deserialize)]
 struct SupervisorPlanEnvelope {
     mission_rewrite: String,
+    #[serde(default)]
     workstreams: Vec<SupervisorWorkstream>,
+    #[serde(default)]
     risk_map: Vec<RiskItem>,
     worker_packets: Vec<SupervisorWorkerPacket>,
+    #[serde(default)]
     supervision_strategy: String,
 }
 
@@ -1188,22 +1220,44 @@ impl SupervisorWorkerPacket {
 /// Infer role_type from a human-readable role name.
 fn infer_role_type(role: &str) -> String {
     let r = role.to_ascii_lowercase();
-    if r.contains("software") || r.contains("swe") { "software-engineer".to_owned() }
-    else if r.contains("research") { "research-engineer".to_owned() }
-    else if r.contains("validation") || r.contains("validat") { "validation-engineer".to_owned() }
-    else if r.contains("architect") { "architecture-engineer".to_owned() }
-    else if r.contains("security") { "security-engineer".to_owned() }
-    else if r.contains("debug") || r.contains("review") { "debug-and-review-engineer".to_owned() }
-    else if r.contains("test") || r.contains("automation") { "testing-and-automation-engineer".to_owned() }
-    else if r.contains("design") { "designer-engineer".to_owned() }
-    else if r.contains("revenue") || r.contains("go-to-market") || r.contains("go to market") || r.contains("gtm") || r.contains("account executive") { "revenue-engineer".to_owned() }
-    else if r.contains("product manager") || r == "pm" || r.contains("product management") { "product-manager".to_owned() }
-    else if r.contains("sales") { "sales-engineer".to_owned() }
-    else if r.contains("solution") { "solutions-engineer".to_owned() }
-    else if r.contains("customer") || r.contains("success") { "customer-success-engineer".to_owned() }
-    else if r.contains("product") { "product-engineer".to_owned() }
-    else if r.contains("compliance") { "compliance-engineer".to_owned() }
-    else { "software-engineer".to_owned() }
+    if r.contains("software") || r.contains("swe") {
+        "software-engineer".to_owned()
+    } else if r.contains("research") {
+        "research-engineer".to_owned()
+    } else if r.contains("validation") || r.contains("validat") {
+        "validation-engineer".to_owned()
+    } else if r.contains("architect") {
+        "architecture-engineer".to_owned()
+    } else if r.contains("security") {
+        "security-engineer".to_owned()
+    } else if r.contains("debug") || r.contains("review") {
+        "debug-and-review-engineer".to_owned()
+    } else if r.contains("test") || r.contains("automation") {
+        "testing-and-automation-engineer".to_owned()
+    } else if r.contains("design") {
+        "designer-engineer".to_owned()
+    } else if r.contains("revenue")
+        || r.contains("go-to-market")
+        || r.contains("go to market")
+        || r.contains("gtm")
+        || r.contains("account executive")
+    {
+        "revenue-engineer".to_owned()
+    } else if r.contains("product manager") || r == "pm" || r.contains("product management") {
+        "product-manager".to_owned()
+    } else if r.contains("sales") {
+        "sales-engineer".to_owned()
+    } else if r.contains("solution") {
+        "solutions-engineer".to_owned()
+    } else if r.contains("customer") || r.contains("success") {
+        "customer-success-engineer".to_owned()
+    } else if r.contains("product") {
+        "product-engineer".to_owned()
+    } else if r.contains("compliance") {
+        "compliance-engineer".to_owned()
+    } else {
+        "software-engineer".to_owned()
+    }
 }
 
 /// Convert role_type to human-readable title.
@@ -1224,13 +1278,18 @@ fn role_type_to_title(role_type: &str) -> String {
         "product-manager" => "Product Manager".to_owned(),
         "revenue-engineer" => "Revenue Engineer".to_owned(),
         "compliance-engineer" => "Compliance Engineer".to_owned(),
-        _ => role_type.replace('-', " ").split_whitespace().map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        }).collect::<Vec<_>>().join(" "),
+        _ => role_type
+            .replace('-', " ")
+            .split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -1272,35 +1331,133 @@ struct SupervisorWorkstream {
 
 impl SupervisorPlanEnvelope {
     fn try_into_plan(self) -> Result<MissionPlan> {
-        let workstreams = self
-            .workstreams
-            .into_iter()
-            .map(|workstream| {
-                Ok(Workstream {
-                    id: workstream.id,
-                    name: workstream.name,
-                    execution: parse_execution(&workstream.execution)?,
-                    owned_scope: workstream.owned_scope,
-                    success_criteria: workstream.success_criteria,
-                    depends_on: workstream.depends_on,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let worker_packets = self
             .worker_packets
             .into_iter()
             .enumerate()
             .map(|(i, p)| p.into_packet(i + 1))
-            .collect();
+            .collect::<Vec<_>>();
+
+        let workstreams = if self.workstreams.is_empty() {
+            synthesize_workstreams(&worker_packets)
+        } else {
+            self.workstreams
+                .into_iter()
+                .map(|workstream| {
+                    Ok(Workstream {
+                        id: workstream.id,
+                        name: workstream.name,
+                        execution: parse_execution(&workstream.execution)?,
+                        owned_scope: workstream.owned_scope,
+                        success_criteria: workstream.success_criteria,
+                        depends_on: workstream.depends_on,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let risk_map = if self.risk_map.is_empty() {
+            synthesize_risk_map(&worker_packets)
+        } else {
+            self.risk_map
+        };
+
+        let supervision_strategy = if self.supervision_strategy.trim().is_empty() {
+            synthesize_supervision_strategy(&worker_packets)
+        } else {
+            self.supervision_strategy
+        };
 
         Ok(MissionPlan {
             mission_rewrite: self.mission_rewrite,
             workstreams,
-            risk_map: self.risk_map,
+            risk_map,
             worker_packets,
-            supervision_strategy: self.supervision_strategy,
+            supervision_strategy,
         })
+    }
+}
+
+fn synthesize_workstreams(worker_packets: &[WorkerPacket]) -> Vec<Workstream> {
+    worker_packets
+        .iter()
+        .enumerate()
+        .map(|(index, packet)| Workstream {
+            id: format!("ws-{}", index + 1),
+            name: synthesized_workstream_name(packet),
+            execution: synthesized_execution(packet),
+            owned_scope: packet.owned_scope.clone(),
+            success_criteria: if packet.definition_of_done.is_empty() {
+                vec![packet.explicit_task.clone()]
+            } else {
+                packet.definition_of_done.iter().take(3).cloned().collect()
+            },
+            depends_on: Vec::new(),
+        })
+        .collect()
+}
+
+fn synthesized_workstream_name(packet: &WorkerPacket) -> String {
+    if !packet.display_name.trim().is_empty() {
+        format!("{} lane", packet.display_name)
+    } else if !packet.role.trim().is_empty() {
+        packet.role.clone()
+    } else {
+        "Workstream".to_owned()
+    }
+}
+
+fn synthesized_execution(packet: &WorkerPacket) -> WorkstreamExecution {
+    let role = packet.role_type.trim().to_ascii_lowercase();
+    if role.contains("validation") || role.contains("testing-and-automation") {
+        WorkstreamExecution::Validation
+    } else if role.contains("architecture") || role.contains("product") {
+        WorkstreamExecution::Integration
+    } else {
+        WorkstreamExecution::Parallel
+    }
+}
+
+fn synthesize_risk_map(worker_packets: &[WorkerPacket]) -> Vec<RiskItem> {
+    let mut risks = vec![RiskItem {
+        zone: "Scope boundaries".to_owned(),
+        risk: "Workers may drift or overlap on shared surfaces".to_owned(),
+        mitigation: "Enforce owned_scope and challenge overlap immediately".to_owned(),
+    }];
+    if worker_packets.iter().any(|packet| {
+        let role = packet.role_type.to_ascii_lowercase();
+        role.contains("validation") || role.contains("testing-and-automation")
+    }) {
+        risks.push(RiskItem {
+            zone: "Validation".to_owned(),
+            risk: "Validation may remain plan-only instead of execution-backed".to_owned(),
+            mitigation: "Demand real test evidence and terminal outputs".to_owned(),
+        });
+    }
+    if worker_packets.len() > 1 {
+        risks.push(RiskItem {
+            zone: "Coordination".to_owned(),
+            risk: "Data contracts or handoffs may diverge across workers".to_owned(),
+            mitigation: "Require explicit communication and supervisor follow-up".to_owned(),
+        });
+    }
+    risks
+}
+
+fn synthesize_supervision_strategy(worker_packets: &[WorkerPacket]) -> String {
+    let validation_lanes = worker_packets
+        .iter()
+        .filter(|packet| {
+            let role = packet.role_type.to_ascii_lowercase();
+            role.contains("validation") || role.contains("testing-and-automation")
+        })
+        .count();
+    if validation_lanes > 0 {
+        "Run implementation lanes in parallel, keep validation lanes evidence-driven, and escalate overlap or weak completion immediately."
+            .to_owned()
+    } else {
+        "Run owned lanes in parallel, enforce distinct scope, and intervene immediately on overlap, stalls, or weak evidence."
+            .to_owned()
     }
 }
 
@@ -1361,6 +1518,7 @@ fn sanitize_supervisor_plan(mut plan: MissionPlan) -> MissionPlan {
             .map(|item| sanitize_plan_text(item))
             .collect();
     }
+    canonicalize_worker_identities(&mut plan);
     plan
 }
 
@@ -1372,6 +1530,105 @@ fn sanitize_plan_text(text: &str) -> String {
         .replace(".sp", "repo root")
         .replace("../tasks.txt", "tasks.txt")
         .replace("../", "")
+        .replace("extremely thunder part", "advanced capability")
+        .replace("really powerful", "high-capability")
+        .replace("super clean", "clean and readable")
+        .replace("legitimately", "")
+        .replace("like really", "")
+}
+
+fn canonicalize_worker_identities(plan: &mut MissionPlan) {
+    use std::collections::HashMap;
+
+    let mut counters = HashMap::<String, usize>::new();
+    let mut rename_map = HashMap::<String, String>::new();
+    for packet in &mut plan.worker_packets {
+        let role_type = if packet.role_type.trim().is_empty() {
+            infer_role_type(&packet.role)
+        } else {
+            packet.role_type.trim().to_owned()
+        };
+        let next = counters
+            .entry(role_type.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let canonical_name = generate_display_name(&role_type, *next);
+
+        for original in [
+            packet.display_name.trim().to_owned(),
+            packet.worker_id.trim().to_owned(),
+        ] {
+            if !original.is_empty() && original != canonical_name {
+                rename_map.insert(original, canonical_name.clone());
+            }
+        }
+
+        packet.role_type = role_type.clone();
+        packet.role = role_type_to_title(&role_type);
+        packet.display_name = canonical_name.clone();
+        packet.worker_id = canonical_name;
+    }
+
+    apply_worker_renames(plan, &rename_map);
+}
+
+fn apply_worker_renames(
+    plan: &mut MissionPlan,
+    rename_map: &std::collections::HashMap<String, String>,
+) {
+    if rename_map.is_empty() {
+        return;
+    }
+    plan.supervision_strategy = replace_worker_aliases(&plan.supervision_strategy, rename_map);
+    for risk in &mut plan.risk_map {
+        risk.zone = replace_worker_aliases(&risk.zone, rename_map);
+        risk.risk = replace_worker_aliases(&risk.risk, rename_map);
+        risk.mitigation = replace_worker_aliases(&risk.mitigation, rename_map);
+    }
+    for packet in &mut plan.worker_packets {
+        packet.starting_angle = replace_worker_aliases(&packet.starting_angle, rename_map);
+        packet.owned_scope = replace_worker_aliases(&packet.owned_scope, rename_map);
+        packet.explicit_task = replace_worker_aliases(&packet.explicit_task, rename_map);
+        packet.out_of_scope = replace_worker_aliases(&packet.out_of_scope, rename_map);
+        packet.blocker_protocol = replace_worker_aliases(&packet.blocker_protocol, rename_map);
+        packet.conflict_warning = replace_worker_aliases(&packet.conflict_warning, rename_map);
+        packet.definition_of_done = packet
+            .definition_of_done
+            .iter()
+            .map(|item| replace_worker_aliases(item, rename_map))
+            .collect();
+        packet.required_evidence = packet
+            .required_evidence
+            .iter()
+            .map(|item| replace_worker_aliases(item, rename_map))
+            .collect();
+        packet.communication_rules = packet
+            .communication_rules
+            .iter()
+            .map(|item| replace_worker_aliases(item, rename_map))
+            .collect();
+        packet.validation_standard = packet
+            .validation_standard
+            .iter()
+            .map(|item| replace_worker_aliases(item, rename_map))
+            .collect();
+        packet.expected_output_format = packet
+            .expected_output_format
+            .iter()
+            .map(|item| replace_worker_aliases(item, rename_map))
+            .collect();
+    }
+}
+
+fn replace_worker_aliases(
+    text: &str,
+    rename_map: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut rendered = text.to_owned();
+    for (from, to) in rename_map {
+        rendered = rendered.replace(from, to);
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -1426,9 +1683,13 @@ mod tests {
 
     #[test]
     fn parses_final_envelope() {
-        let raw = "FINAL_STATE: validated\nFINAL_SUMMARY: ship it";
+        let raw = "FINAL_STATE: validated\nREADY_FOR_CLEANUP: yes\nFINAL_SUMMARY: ship it\nBEGIN_FINAL_REPORT_MD\n## Mission Outcome\n- Result: validated\nEND_FINAL_REPORT_MD";
         let final_state = extract_final_envelope_impl(raw).expect("final");
         assert_eq!(final_state.summary, "ship it");
+        assert_eq!(
+            final_state.report_markdown.as_deref(),
+            Some("## Mission Outcome\n- Result: validated")
+        );
     }
 
     #[test]
@@ -1443,6 +1704,46 @@ mod tests {
         assert_eq!(plan.worker_packets.len(), 1);
         assert_eq!(plan.worker_packets[0].display_name, "Engineer-1");
         assert_eq!(plan.worker_packets[0].role_type, "software-engineer");
+    }
+
+    #[test]
+    fn parses_repaired_supervisor_plan_json() {
+        let raw = concat!(
+            "BEGIN_SAPPHIRE_PLAN_JSON\n",
+            "{\n",
+            "  \"plan\": {\n",
+            "    \"mission_rewrite\": \"tight mission\",\n",
+            "    \"workstreams\": [{\"id\":\"baseline\",\"name\":\"Baseline\",\"execution\":\"parallel\",\"owned_scope\":\"inspect repo\",\"success_criteria\":[\"facts gathered\"],\"depends_on\":[],}],\n",
+            "    \"risk_map\": [{\"zone\":\"repo\",\"risk\":\"unknown state\",\"mitigation\":\"inspect first\",}],\n",
+            "    \"worker_packets\": [{\"worker_id\":\"Engineer-1\",\"role\":\"Software Engineer\",\"role_type\":\"software-engineer\",\"display_name\":\"Engineer-1\",\"owned_scope\":\"inspect repo\",\"explicit_task\":\"inspect repo\",\"out_of_scope\":\"do not edit\",\"definition_of_done\":[\"facts gathered\"],\"required_evidence\":[\"files and commands\"],\"blocker_protocol\":\"escalate blockers\",\"conflict_warning\":\"avoid overlap\",\"expected_output_format\":[\"Summary\"],}],\n",
+            "    \"supervision_strategy\": \"tight control\",\n",
+            "  }\n",
+            "}\n",
+            "END_SAPPHIRE_PLAN_JSON\n"
+        );
+        let plan = extract_supervisor_plan_impl(raw).expect("repaired plan");
+        assert_eq!(plan.mission_rewrite, "tight mission");
+        assert_eq!(plan.worker_packets.len(), 1);
+    }
+
+    #[test]
+    fn parses_minimal_supervisor_plan_and_synthesizes_missing_sections() {
+        let raw = concat!(
+            "BEGIN_SAPPHIRE_PLAN_JSON\n",
+            "{",
+            "\"mission_rewrite\":\"tight mission\",",
+            "\"worker_packets\":[",
+            "{\"worker_id\":\"Engineer-1\",\"role\":\"Software Engineer\",\"role_type\":\"software-engineer\",\"display_name\":\"Engineer-1\",\"starting_angle\":\"parser first\",\"owned_scope\":\"src/parser.rs\",\"explicit_task\":\"implement parser\",\"out_of_scope\":\"tests/\",\"definition_of_done\":[\"parser works\"],\"required_evidence\":[\"tests\"],\"blocker_protocol\":\"escalate blockers\",\"conflict_warning\":\"avoid overlap\",\"communication_rules\":[\"coordinate on contracts\"],\"validation_standard\":[\"tests pass\"],\"expected_output_format\":[\"summary\"]}",
+            "]",
+            "}\n",
+            "END_SAPPHIRE_PLAN_JSON\n"
+        );
+        let plan = extract_supervisor_plan_impl(raw).expect("minimal plan");
+        assert_eq!(plan.mission_rewrite, "tight mission");
+        assert_eq!(plan.worker_packets.len(), 1);
+        assert!(!plan.workstreams.is_empty());
+        assert!(!plan.risk_map.is_empty());
+        assert!(!plan.supervision_strategy.trim().is_empty());
     }
 
     #[test]
@@ -1467,8 +1768,7 @@ mod tests {
             expected_output_format: vec!["Summary".to_owned()],
         };
 
-        let prompt =
-            adapter.build_assignment_prompt(&prompts, "Fix the launch flow.", &packet);
+        let prompt = adapter.build_assignment_prompt(&prompts, "Fix the launch flow.", &packet);
 
         assert!(prompt.contains("# Software Engineer"));
         assert!(prompt.contains("## Mission"));
@@ -1476,6 +1776,6 @@ mod tests {
         assert!(prompt.contains("Worker:"));
         assert!(prompt.contains("software-engineer"));
         assert!(prompt.contains("## Sapphire Control Protocol"));
-        assert!(prompt.lines().count() <= 85);
+        assert!(prompt.lines().count() <= 130);
     }
 }

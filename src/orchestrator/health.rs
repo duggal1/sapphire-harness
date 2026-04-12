@@ -14,6 +14,72 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerLivenessState {
+    Assigned,
+    PromptDelivered,
+    Booting,
+    AliveUnconfirmed,
+    AliveConfirmed,
+    Executing,
+    Reporting,
+    Blocked,
+    Stalled,
+    Nonresponsive,
+    Failed,
+    Done,
+}
+
+impl WorkerLivenessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::PromptDelivered => "prompt_delivered",
+            Self::Booting => "booting",
+            Self::AliveUnconfirmed => "alive_unconfirmed",
+            Self::AliveConfirmed => "alive_confirmed",
+            Self::Executing => "executing",
+            Self::Reporting => "reporting",
+            Self::Blocked => "blocked",
+            Self::Stalled => "stalled",
+            Self::Nonresponsive => "nonresponsive",
+            Self::Failed => "failed",
+            Self::Done => "done",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncidentScope {
+    None,
+    Local,
+    Systemic,
+}
+
+impl IncidentScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Local => "local",
+            Self::Systemic => "systemic",
+        }
+    }
+}
+
+pub fn first_status_systemic_threshold(worker_count: usize) -> usize {
+    match worker_count {
+        0 | 1 => worker_count,
+        2 | 3 => 2,
+        count => count.div_ceil(2),
+    }
+}
+
+pub fn is_systemic_first_status_incident(worker_count: usize, overdue_workers: usize) -> bool {
+    worker_count >= 2
+        && overdue_workers >= first_status_systemic_threshold(worker_count)
+        && overdue_workers * 2 >= worker_count
+}
+
 // ─── Health Check State (from Gas Town decon.md:182-310) ──────────────────
 
 /// Tracks per-session health check outcomes.
@@ -178,7 +244,11 @@ impl MassDeathDetector {
 
         // Prune deaths outside the window
         let cutoff = now.checked_sub(self.window)?;
-        while self.recent_deaths.front().is_some_and(|d| d.timestamp < cutoff) {
+        while self
+            .recent_deaths
+            .front()
+            .is_some_and(|d| d.timestamp < cutoff)
+        {
             self.recent_deaths.pop_front();
         }
 

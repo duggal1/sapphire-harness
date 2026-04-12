@@ -24,7 +24,9 @@ impl LeaseStore {
     }
 
     pub fn mission_file(&self, mission_id: &Uuid) -> PathBuf {
-        self.base_dir.join(mission_id.to_string()).join("leases.jsonl")
+        self.base_dir
+            .join(mission_id.to_string())
+            .join("leases.jsonl")
     }
 
     pub fn upsert_lease(&self, mission_id: &Uuid, lease: &LeaseRecord) -> Result<()> {
@@ -62,14 +64,28 @@ impl LeaseStore {
                 if val.get("path").and_then(|v| v.as_str()) == Some(path) {
                     latest = Some(LeaseRecord {
                         mission_id: *mission_id,
-                        path: val.get("path").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                        owner_session_id: val.get("owner_worker_id")
+                        path: val
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        owner_session_id: val
+                            .get("owner_worker_id")
                             .and_then(|v| v.as_str())
                             .and_then(|s| Uuid::parse_str(s).ok())
                             .unwrap_or_default(),
-                        intent: val.get("intent").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                        status: val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                        updated_at: val.get("updated_at")
+                        intent: val
+                            .get("intent")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        status: val
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        updated_at: val
+                            .get("updated_at")
                             .and_then(|v| v.as_str())
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_else(|| chrono::Utc::now()),

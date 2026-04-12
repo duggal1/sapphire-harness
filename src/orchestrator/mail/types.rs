@@ -21,9 +21,12 @@ pub fn normalize_message_type(raw: &str) -> &'static str {
         "escalation" => "escalation",
         "scavenge" => "scavenge",
         // Legacy → task (requires action from recipient)
-        "dependency_request" | "dependency_response"
-        | "review_request" | "review_response"
-        | "handoff" | "collision_warning" => "task",
+        "dependency_request"
+        | "dependency_response"
+        | "review_request"
+        | "review_response"
+        | "handoff"
+        | "collision_warning" => "task",
         // Legacy → notification (FYI, no action)
         "completion_notice" => "notification",
         // Legacy → escalation (blocker requiring supervisor attention)
@@ -63,7 +66,11 @@ pub fn requires_ack(msg_type: &str, priority: &str, explicit_ack: bool) -> bool 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 /// Validate mail directive before routing. Returns error message on failure.
-pub fn validate_mail(directive: &MailDirective, sender_session_id: uuid::Uuid, recipient_session_id: uuid::Uuid) -> Option<String> {
+pub fn validate_mail(
+    directive: &MailDirective,
+    sender_session_id: uuid::Uuid,
+    recipient_session_id: uuid::Uuid,
+) -> Option<String> {
     if directive.subject.is_empty() {
         return Some("SAPPHIRE_MAIL rejected: subject is empty.".to_owned());
     }
@@ -73,7 +80,8 @@ pub fn validate_mail(directive: &MailDirective, sender_session_id: uuid::Uuid, r
             directive.subject.len()
         ));
     }
-    let body_len = directive.context.len() + directive.request.len() + directive.expected_action.len();
+    let body_len =
+        directive.context.len() + directive.request.len() + directive.expected_action.len();
     if body_len > 8192 {
         return Some(format!(
             "SAPPHIRE_MAIL rejected: body too long ({} chars, max 8KB).",
@@ -81,13 +89,18 @@ pub fn validate_mail(directive: &MailDirective, sender_session_id: uuid::Uuid, r
         ));
     }
     if sender_session_id == recipient_session_id
-        && !matches!(normalize_message_type(&directive.message_type), "task" | "notification")
+        && !matches!(
+            normalize_message_type(&directive.message_type),
+            "task" | "notification"
+        )
     {
         return Some("SAPPHIRE_MAIL rejected: sender and recipient are the same session. Use internal state instead.".to_owned());
     }
-    if directive.cc.iter().any(|addr| {
-        addr.eq_ignore_ascii_case("supervisor") || addr.eq_ignore_ascii_case("sup")
-    }) && normalize_message_type(&directive.message_type) != "escalation"
+    if directive
+        .cc
+        .iter()
+        .any(|addr| addr.eq_ignore_ascii_case("supervisor") || addr.eq_ignore_ascii_case("sup"))
+        && normalize_message_type(&directive.message_type) != "escalation"
     {
         // Warning only, not rejection
     }
@@ -129,8 +142,8 @@ pub struct MailHandlingResult {
 // ─── Nudge types ─────────────────────────────────────────────────────────────
 
 /// Nudge queue constants
-const NORMAL_TTL_SECS: i64 = 30 * 60;  // 30 min
-const URGENT_TTL_SECS: i64 = 2 * 3600;  // 2 hr
+const NORMAL_TTL_SECS: i64 = 30 * 60; // 30 min
+const URGENT_TTL_SECS: i64 = 2 * 3600; // 2 hr
 
 /// A queued nudge waiting for the agent to reach a natural turn boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,14 +158,29 @@ pub struct QueuedNudge {
 
 /// Create a nudge from a mail directive.
 pub fn nudge_from_mail(directive: &MailDirective, sender_name: &str) -> QueuedNudge {
-    let is_urgent = matches!(directive.priority.to_lowercase().as_str(), "urgent" | "critical");
+    let is_urgent = matches!(
+        directive.priority.to_lowercase().as_str(),
+        "urgent" | "critical"
+    );
     let now = chrono::Utc::now();
     QueuedNudge {
         sender: sender_name.to_owned(),
-        message: format!("[{}] {} — {}", directive.message_type, directive.subject, directive.request),
-        priority: if is_urgent { "urgent".to_owned() } else { "normal".to_owned() },
+        message: format!(
+            "[{}] {} — {}",
+            directive.message_type, directive.subject, directive.request
+        ),
+        priority: if is_urgent {
+            "urgent".to_owned()
+        } else {
+            "normal".to_owned()
+        },
         thread_id: directive.thread_id.clone(),
         timestamp: now,
-        expires_at: now + chrono::Duration::seconds(if is_urgent { URGENT_TTL_SECS } else { NORMAL_TTL_SECS }),
+        expires_at: now
+            + chrono::Duration::seconds(if is_urgent {
+                URGENT_TTL_SECS
+            } else {
+                NORMAL_TTL_SECS
+            }),
     }
 }

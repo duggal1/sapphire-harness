@@ -7,8 +7,8 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::store::Store;
 use crate::orchestrator::ActiveSession;
+use crate::store::Store;
 
 // Re-export PendingMail from the orchestrator
 pub use super::PendingMail;
@@ -27,11 +27,7 @@ pub fn mail_timeout_stage_due(pending: &PendingMail, now: Instant) -> bool {
     now.duration_since(since) >= mail_timeout_interval(&pending.priority)
 }
 
-pub fn recipient_timeout_prompt(
-    pending: &PendingMail,
-    sender_name: &str,
-    stage: u8,
-) -> String {
+pub fn recipient_timeout_prompt(pending: &PendingMail, sender_name: &str, stage: u8) -> String {
     match stage {
         1 => format!(
             "Outstanding {} mail in thread {} from {}: '{}'. Reply now.\nSAPPHIRE_ACK statuses allowed: acked if you own it, done if finished, cannot_comply with one concrete blocker.\nIf partially blocked, send one narrow teammate reply and keep moving.",
@@ -48,11 +44,7 @@ pub fn recipient_timeout_prompt(
     }
 }
 
-pub fn sender_timeout_prompt(
-    pending: &PendingMail,
-    recipient_name: &str,
-    stage: u8,
-) -> String {
+pub fn sender_timeout_prompt(pending: &PendingMail, recipient_name: &str, stage: u8) -> String {
     match stage {
         1 => format!(
             "Your mail '{}' to {} in thread {} is still waiting on acknowledgment. Keep moving on independent work. Prepare a narrower follow-up or alternate teammate path if it becomes critical.",

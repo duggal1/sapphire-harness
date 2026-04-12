@@ -212,14 +212,7 @@ impl Tmux {
         work_dir: &str,
         command: &str,
     ) -> Result<String, String> {
-        let mut args = vec![
-            "split-window",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-c",
-            work_dir,
-        ];
+        let mut args = vec!["split-window", "-P", "-F", "#{pane_id}", "-c", work_dir];
         if horizontal {
             args.push("-h");
         } else {
@@ -322,12 +315,7 @@ impl Tmux {
     }
 
     /// Set a tmux window option.
-    pub fn set_window_option(
-        &self,
-        session: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), String> {
+    pub fn set_window_option(&self, session: &str, key: &str, value: &str) -> Result<(), String> {
         self.run(&["set-window-option", "-t", session, key, value])?;
         Ok(())
     }
@@ -380,9 +368,12 @@ impl Tmux {
             // VS Code terminal: open Ghostty window directly (no AppleScript needed)
             if terminal_program() == Some("vscode") {
                 if ghostty_app_path().is_some() {
-                    self.open_ghostty_window_for_session(session).map_err(|error| {
-                        format!("failed to open Ghostty window for tmux session {session}: {error}")
-                    })?;
+                    self.open_ghostty_window_for_session(session)
+                        .map_err(|error| {
+                            format!(
+                                "failed to open Ghostty window for tmux session {session}: {error}"
+                            )
+                        })?;
                     return Ok(());
                 }
                 // Ghostty not installed — fall through to Apple Terminal
@@ -480,9 +471,9 @@ impl Tmux {
                 );
                 Ok(())
             }
-            Err(error) => self.open_ghostty_window_fallback(session).map_err(|fallback_error| {
-                format!("{error}; fallback failed: {fallback_error}")
-            }),
+            Err(error) => self
+                .open_ghostty_window_fallback(session)
+                .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}")),
         }
     }
 
@@ -596,7 +587,11 @@ impl Tmux {
 
     /// Check session health: is the agent process alive within the tmux session?
     /// Uses pane PID → process liveness check (from gastown ZFC-compliant pattern).
-    pub fn check_session_health(&self, target: &str, max_inactivity: std::time::Duration) -> SessionHealth {
+    pub fn check_session_health(
+        &self,
+        target: &str,
+        max_inactivity: std::time::Duration,
+    ) -> SessionHealth {
         if let Some(created_at) = self.get_session_created(target) {
             if let Ok(age) = std::time::SystemTime::now().duration_since(created_at) {
                 if age < zombie_starting_grace_period() {
@@ -660,7 +655,8 @@ impl Tmux {
     pub fn set_auto_respawn_hook(&self, pane: &str, command: &str) -> Result<(), String> {
         let hook_cmd = format!(
             "respawn-pane -k -t {} -c '#{{pane_current_path}}' -- {}",
-            pane, shell_quote(command)
+            pane,
+            shell_quote(command)
         );
         self.run(&["set-hook", "-t", pane, "pane-exited", &hook_cmd])?;
         Ok(())
@@ -734,7 +730,11 @@ fn applescript_escape(text: &str) -> String {
 
 #[allow(dead_code)]
 fn terminal_program() -> Option<&'static str> {
-    match std::env::var("TERM_PROGRAM").ok()?.to_ascii_lowercase().as_str() {
+    match std::env::var("TERM_PROGRAM")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "ghostty" => Some("ghostty"),
         "vscode" => Some("vscode"),
         "apple_terminal" => Some("apple_terminal"),

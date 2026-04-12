@@ -20,28 +20,70 @@ impl PromptLibrary {
             ($key:expr, $path:expr) => {
                 role_templates.insert(
                     $key.to_owned(),
-                    Arc::from(include_str!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        $path
-                    ))),
+                    Arc::from(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), $path))),
                 );
             };
         }
-        role!("software-engineer", "/src/internal/agents/templetes/roles/job-roles/software-engineer.md");
-        role!("research-engineer", "/src/internal/agents/templetes/roles/job-roles/research-engineer.md");
-        role!("validation-engineer", "/src/internal/agents/templetes/roles/job-roles/validation-engineer.md");
-        role!("architecture-engineer", "/src/internal/agents/templetes/roles/job-roles/architecture-engineer.md");
-        role!("security-engineer", "/src/internal/agents/templetes/roles/job-roles/security-engineer.md");
-        role!("debug-and-review-engineer", "/src/internal/agents/templetes/roles/job-roles/debug-and-review-engineer.md");
-        role!("testing-and-automation-engineer", "/src/internal/agents/templetes/roles/job-roles/testing-and-automation-engineer.md");
-        role!("designer-engineer", "/src/internal/agents/templetes/roles/job-roles/designer-engineer.md");
-        role!("sales-engineer", "/src/internal/agents/templetes/roles/job-roles/sales-engineer.md");
-        role!("solutions-engineer", "/src/internal/agents/templetes/roles/job-roles/solutions-engineer.md");
-        role!("customer-success-engineer", "/src/internal/agents/templetes/roles/job-roles/customer-success-engineer.md");
-        role!("product-engineer", "/src/internal/agents/templetes/roles/job-roles/product-engineer.md");
-        role!("product-manager", "/src/internal/agents/templetes/roles/job-roles/product-manager.md");
-        role!("revenue-engineer", "/src/internal/agents/templetes/roles/job-roles/revenue-engineer.md");
-        role!("compliance-engineer", "/src/internal/agents/templetes/roles/job-roles/compliance-engineer.md");
+        role!(
+            "software-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/software-engineer.md"
+        );
+        role!(
+            "research-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/research-engineer.md"
+        );
+        role!(
+            "validation-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/validation-engineer.md"
+        );
+        role!(
+            "architecture-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/architecture-engineer.md"
+        );
+        role!(
+            "security-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/security-engineer.md"
+        );
+        role!(
+            "debug-and-review-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/debug-and-review-engineer.md"
+        );
+        role!(
+            "testing-and-automation-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/testing-and-automation-engineer.md"
+        );
+        role!(
+            "designer-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/designer-engineer.md"
+        );
+        role!(
+            "sales-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/sales-engineer.md"
+        );
+        role!(
+            "solutions-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/solutions-engineer.md"
+        );
+        role!(
+            "customer-success-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/customer-success-engineer.md"
+        );
+        role!(
+            "product-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/product-engineer.md"
+        );
+        role!(
+            "product-manager",
+            "/src/internal/agents/templetes/roles/job-roles/product-manager.md"
+        );
+        role!(
+            "revenue-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/revenue-engineer.md"
+        );
+        role!(
+            "compliance-engineer",
+            "/src/internal/agents/templetes/roles/job-roles/compliance-engineer.md"
+        );
 
         Self {
             product_direction: include_str!(concat!(
@@ -157,7 +199,10 @@ Sapphire Control Protocol:
         // git rules, pushback policy, and definition of done.
         let role_template = match self.role_template(&packet.role_type) {
             Some(t) => t.to_string(),
-            None => format!("# {}\n\nNo role template available for role_type '{}'.\nFollow the mission and packet instructions.\n", packet.display_name, packet.role_type),
+            None => format!(
+                "# {}\n\nNo role template available for role_type '{}'.\nFollow the mission and packet instructions.\n",
+                packet.display_name, packet.role_type
+            ),
         };
 
         format!(
@@ -324,7 +369,10 @@ fn compact_role_template(raw: &str) -> String {
     let first_steps = markdown_section_lines(raw, "## First-Step Protocol", 4);
     let pushback = markdown_section_body(raw, "## Pushback Policy")
         .map(|value| truncate_sentence(&single_line(&value), 180))
-        .unwrap_or_else(|| "Push back briefly when the requested path is technically wrong, unsafe, or bloated.".to_owned());
+        .unwrap_or_else(|| {
+            "Push back briefly when the requested path is technically wrong, unsafe, or bloated."
+                .to_owned()
+        });
 
     // New role templates already include "Operating Rules" with team awareness,
     // git discipline, and coordination rules. Use them directly — don't synthesize.
@@ -409,7 +457,10 @@ fn control_protocol(supervisor: bool) -> String {
 
     if supervisor {
         lines.push("Use mail for corrections, proof requests, validation challenges, and conflict rulings.".to_owned());
-        lines.push("Human-readable supervision can be short, but the control line must still be exact.".to_owned());
+        lines.push(
+            "Human-readable supervision can be short, but the control line must still be exact."
+                .to_owned(),
+        );
         lines.push("Act like the strict execution authority: push back on drift, answer continue-or-stop questions directly, and approve cleanup only when the whole team is actually done.".to_owned());
     } else {
         lines.push("If blocked on another agent, send mail instead of vague prose.".to_owned());
@@ -418,10 +469,14 @@ fn control_protocol(supervisor: bool) -> String {
         lines.push("Use task for action requests, reply for answers or handoffs, notification for FYI, escalation only when supervisor visibility is genuinely required.".to_owned());
         lines.push("When claiming completion, use state done_claimed first. Do not assume acceptance before validation.".to_owned());
         lines.push("Status file rule: use the assigned state-dir status path first, hidden fallback second, terminal SAPPHIRE_STATUS only as last fallback.".to_owned());
-        lines.push("Status JSON fields: state, summary, files, commands, risks, overlap.".to_owned());
-        lines.push("Report back after prompt ingestion, on material progress, on blockers, on teammate waits, and before completion claims.".to_owned());
+        lines.push(
+            "Status JSON fields: state, summary, files, commands, risks, overlap.".to_owned(),
+        );
+        lines.push("First status is mandatory before repo exploration: report true current state and exact next action, not a plan.".to_owned());
+        lines.push("Report back after prompt ingestion, on material progress, on blockers, on teammate waits, after transient runtime recovery, and before completion claims.".to_owned());
         lines.push("Supervisor challenge beats watchdog noise: answer the supervisor with proof, not broad narration.".to_owned());
         lines.push("You are not alone. Preserve teammate edits, coordinate narrow asks, and escalate only after peer coordination actually failed.".to_owned());
+        lines.push("If the CLI/runtime hits rate limit, disconnect, retry UI, or similar transient failure, recover in place from the last confirmed work state. Do not restart the mission or ask for the assignment again.".to_owned());
     }
 
     bullet_list(&lines)

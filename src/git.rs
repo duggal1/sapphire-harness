@@ -54,10 +54,7 @@ fn render_banner() {
 /// Best-effort terminal width detection. Falls back to None.
 fn terminal_width() -> Option<usize> {
     use std::process::Command;
-    let output = Command::new("tput")
-        .arg("cols")
-        .output()
-        .ok()?;
+    let output = Command::new("tput").arg("cols").output().ok()?;
     if output.status.success() {
         String::from_utf8_lossy(&output.stdout)
             .trim()
@@ -226,7 +223,9 @@ pub fn prompt_git_init(repo: &Path, git_state: &GitState) -> Result<GitInitResul
         );
         println!(
             "     {}",
-            ansi::muted("Expected: git@github.com:user/repo.git or https://github.com/user/repo.git")
+            ansi::muted(
+                "Expected: git@github.com:user/repo.git or https://github.com/user/repo.git"
+            )
         );
         println!();
     }
@@ -256,11 +255,11 @@ fn init_and_return(repo: &Path, git_state: &GitState, url: &str) -> Result<GitIn
                     _ => "Git configured",
                 })
             );
+            println!("     {}", ansi::muted(&format!("origin → {url}")));
             println!(
                 "     {}",
-                ansi::muted(&format!("origin → {url}"))
+                ansi::muted("Sapphire will continue with Git collaboration enabled.")
             );
-            println!("     {}", ansi::muted("Sapphire will continue with Git collaboration enabled."));
             println!();
             println!("  {}", ansi::rule(&rule_line()));
             println!();
@@ -275,11 +274,11 @@ fn init_and_return(repo: &Path, git_state: &GitState, url: &str) -> Result<GitIn
                 ansi::danger_bold(Symbol::Error.as_str()),
                 ansi::danger_bold("Git setup failed")
             );
+            println!("     {}", ansi::muted(&e.to_string()));
             println!(
                 "     {}",
-                ansi::muted(&e.to_string())
+                ansi::muted("Continuing without Git initialization.")
             );
-            println!("     {}", ansi::muted("Continuing without Git initialization."));
             println!();
             Ok(GitInitResult::Declined)
         }
@@ -309,12 +308,7 @@ fn looks_like_git_url(url: &str) -> bool {
 pub fn init_git_repo(repo: &Path, remote_url: &str) -> Result<()> {
     run_git_command(
         repo,
-        &[
-            "-c",
-            "init.defaultBranch=main",
-            "init",
-            "-q",
-        ],
+        &["-c", "init.defaultBranch=main", "init", "-q"],
         "git init failed",
     )?;
 

@@ -73,61 +73,59 @@ impl AgentKind {
             );
         }
 
-        let (program, base_args, prompt_delay, startup_input, startup_rules, submit_mode) = match self {
-            Self::Qwen => (
-                "qwen",
-                vec![
-                    "--approval-mode".to_owned(),
-                    "yolo".to_owned(),
-                ],
-                Duration::from_millis(14000),
-                Some((Duration::from_millis(8000), "\n".to_owned())),
-                vec![StartupAutomationRule::new(
-                    "qwen_ide_prompt",
-                    "Do you want to connect IDE to Qwen Code?",
-                    "2\n",
-                )],
-                SubmitMode::CarriageReturn,
-            ),
-            Self::Forge => (
-                "forge",
-                Vec::new(),
-                Duration::from_millis(1200),
-                Some((Duration::from_millis(400), "\n".to_owned())),
-                Vec::new(),
-                SubmitMode::LineFeed,
-            ),
-            Self::Codex => (
-                "codex",
-                vec![
-                    "--no-alt-screen".to_owned(),
-                    "-m".to_owned(),
-                    "gpt-5.4-mini".to_owned(),
-                    "-c".to_owned(),
-                    "model_reasoning_effort=low".to_owned(),
-                ],
-                Duration::from_millis(1800),
-                Some((Duration::from_millis(400), "\n".to_owned())),
-                vec![StartupAutomationRule::new(
-                    "codex_trust_prompt",
-                    "directory?",
-                    "1\n",
-                )],
-                SubmitMode::CarriageReturn,
-            ),
-            Self::Claude => (
-                "claude",
-                Vec::new(),
-                Duration::from_millis(3200),
-                Some((Duration::from_millis(600), "\n".to_owned())),
-                vec![StartupAutomationRule::new(
-                    "claude_trust_prompt",
-                    "Yes, I trust this folder",
-                    "\n",
-                )],
-                SubmitMode::CarriageReturn,
-            ),
-        };
+        let (program, base_args, prompt_delay, startup_input, startup_rules, submit_mode) =
+            match self {
+                Self::Qwen => (
+                    "qwen",
+                    vec!["--approval-mode".to_owned(), "yolo".to_owned()],
+                    Duration::from_millis(14000),
+                    Some((Duration::from_millis(8000), "\n".to_owned())),
+                    vec![StartupAutomationRule::new(
+                        "qwen_ide_prompt",
+                        "Do you want to connect IDE to Qwen Code?",
+                        "2\n",
+                    )],
+                    SubmitMode::CarriageReturn,
+                ),
+                Self::Forge => (
+                    "forge",
+                    Vec::new(),
+                    Duration::from_millis(1200),
+                    Some((Duration::from_millis(400), "\n".to_owned())),
+                    Vec::new(),
+                    SubmitMode::LineFeed,
+                ),
+                Self::Codex => (
+                    "codex",
+                    vec![
+                        "--no-alt-screen".to_owned(),
+                        "-m".to_owned(),
+                        "gpt-5.4-mini".to_owned(),
+                        "-c".to_owned(),
+                        "model_reasoning_effort=low".to_owned(),
+                    ],
+                    Duration::from_millis(1800),
+                    Some((Duration::from_millis(400), "\n".to_owned())),
+                    vec![StartupAutomationRule::new(
+                        "codex_trust_prompt",
+                        "directory?",
+                        "1\n",
+                    )],
+                    SubmitMode::CarriageReturn,
+                ),
+                Self::Claude => (
+                    "claude",
+                    Vec::new(),
+                    Duration::from_millis(3200),
+                    Some((Duration::from_millis(600), "\n".to_owned())),
+                    vec![StartupAutomationRule::new(
+                        "claude_trust_prompt",
+                        "Yes, I trust this folder",
+                        "\n",
+                    )],
+                    SubmitMode::CarriageReturn,
+                ),
+            };
 
         let mut args = base_args;
         args.extend(extra_args.iter().cloned());

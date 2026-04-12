@@ -47,17 +47,20 @@ impl LiveState {
 
     pub fn touch_session(&mut self, session_id: Uuid) {
         let now = std::time::Instant::now();
-        let entry = self.sessions.entry(session_id).or_insert_with(|| ActiveSession {
-            last_heartbeat: now,
-            intervention_cooldown_until: None,
-            last_intervention_type: None,
-            total_interventions: 0,
-            last_response_time: None,
-            last_intervention_at: None,
-            consecutive_stall_failures: 0,
-            last_confirmed_alive: now,
-            queued_prompts: Vec::new(),
-        });
+        let entry = self
+            .sessions
+            .entry(session_id)
+            .or_insert_with(|| ActiveSession {
+                last_heartbeat: now,
+                intervention_cooldown_until: None,
+                last_intervention_type: None,
+                total_interventions: 0,
+                last_response_time: None,
+                last_intervention_at: None,
+                consecutive_stall_failures: 0,
+                last_confirmed_alive: now,
+                queued_prompts: Vec::new(),
+            });
         entry.last_heartbeat = now;
         entry.last_confirmed_alive = now;
         // Reset cooldown on output
@@ -86,14 +89,17 @@ impl LiveState {
         mission_id: Uuid,
     ) -> Result<crate::model::RestartRecord> {
         let now = Utc::now();
-        let state = self.restarts.entry(session_id).or_insert_with(|| RestartState {
-            session_id,
-            mission_id,
-            restart_count: 0,
-            first_restart_at: now,
-            last_restart_at: now,
-            backoff_seconds: restart_base_secs() as f64,
-        });
+        let state = self
+            .restarts
+            .entry(session_id)
+            .or_insert_with(|| RestartState {
+                session_id,
+                mission_id,
+                restart_count: 0,
+                first_restart_at: now,
+                last_restart_at: now,
+                backoff_seconds: restart_base_secs() as f64,
+            });
 
         state.restart_count += 1;
         state.last_restart_at = now;
@@ -144,12 +150,19 @@ impl LiveState {
             .filter(|s| {
                 s.mission_id == *mission_id
                     && s.restart_count >= threshold
-                    && now.signed_duration_since(s.first_restart_at).to_std().map_or(false, |d| d <= window)
+                    && now
+                        .signed_duration_since(s.first_restart_at)
+                        .to_std()
+                        .map_or(false, |d| d <= window)
             })
             .map(|s| (s.session_id, s.restart_count))
             .collect()
     }
 }
 
-fn restart_base_secs() -> u64 { 2 }
-fn restart_max_secs() -> u64 { 300 }
+fn restart_base_secs() -> u64 {
+    2
+}
+fn restart_max_secs() -> u64 {
+    300
+}

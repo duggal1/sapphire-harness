@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use blake3::hash;
+use uuid::Uuid;
 
 use crate::model::SessionRole;
 use crate::protocol::MailDirective;
-use uuid::Uuid;
 
-use super::{live_state, ActiveSession, PendingMail};
+use super::{ActiveSession, PendingMail, live_state};
 
 pub const MAX_CC_RECIPIENTS: usize = 3;
 pub const MAX_ACTIVE_THREADS_PER_WORKER: usize = 8;
@@ -51,9 +51,10 @@ pub fn pod_for_role(role_type: &str) -> &'static str {
         "architecture-engineer" | "security-engineer" | "compliance-engineer" => "platform",
         "designer-engineer" | "product-engineer" | "product-manager" => "product",
         "research-engineer" | "validation-engineer" => "research",
-        "sales-engineer" | "solutions-engineer" | "customer-success-engineer" | "revenue-engineer" => {
-            "revenue"
-        }
+        "sales-engineer"
+        | "solutions-engineer"
+        | "customer-success-engineer"
+        | "revenue-engineer" => "revenue",
         "supervisor" => "executive",
         _ => "general",
     }
@@ -70,10 +71,14 @@ pub fn normalize_mail_intent(message_type: &str, expected_action: &str) -> &'sta
         "decision_request"
     } else if lowered.contains("status") || expected.contains("status") {
         "status_request"
-    } else if lowered.contains("proof") || expected.contains("proof") || expected.contains("evidence")
+    } else if lowered.contains("proof")
+        || expected.contains("proof")
+        || expected.contains("evidence")
     {
         "proof_request"
-    } else if lowered.contains("blocker") || lowered.contains("escalation") || expected.contains("block")
+    } else if lowered.contains("blocker")
+        || lowered.contains("escalation")
+        || expected.contains("block")
     {
         "blocker"
     } else if lowered.contains("reply") {
@@ -125,10 +130,15 @@ pub fn govern_mail(
     let recipient_role = session_role_type(recipient);
     let sender_pod = pod_for_role(sender_role).to_owned();
     let recipient_pod = pod_for_role(recipient_role).to_owned();
-    let intent = normalize_mail_intent(&directive.message_type, &directive.expected_action).to_owned();
+    let intent =
+        normalize_mail_intent(&directive.message_type, &directive.expected_action).to_owned();
     let routing_class = routing_class(sender_role, recipient_role, &intent).to_owned();
-    let duplicate_key =
-        duplicate_thread_key(&sender.record.name, &recipient.record.name, &directive.subject, &intent);
+    let duplicate_key = duplicate_thread_key(
+        &sender.record.name,
+        &recipient.record.name,
+        &directive.subject,
+        &intent,
+    );
 
     let sender_open_threads = pending_mail
         .values()
@@ -155,14 +165,20 @@ pub fn govern_mail(
             directive.cc.len()
         ))
     } else if sender_open_threads >= MAX_ACTIVE_THREADS_PER_WORKER
-        && !matches!(directive.priority.to_ascii_lowercase().as_str(), "urgent" | "critical")
+        && !matches!(
+            directive.priority.to_ascii_lowercase().as_str(),
+            "urgent" | "critical"
+        )
     {
         Some(format!(
             "{} already has {} open coordination threads. Close or reroute before opening more.",
             sender.record.name, sender_open_threads
         ))
     } else if pair_open_threads >= MAX_OPEN_THREADS_PER_PAIR
-        && !matches!(directive.priority.to_ascii_lowercase().as_str(), "urgent" | "critical")
+        && !matches!(
+            directive.priority.to_ascii_lowercase().as_str(),
+            "urgent" | "critical"
+        )
     {
         Some(format!(
             "{} already has {} unresolved thread(s) with {} on this same ask. Do not spam. Wait, narrow the ask, or escalate with concrete blocker context.",
@@ -220,7 +236,11 @@ pub fn preferred_counterparts(role_type: &str) -> &'static [&'static str] {
         "research-engineer" => &["product-manager", "designer-engineer", "software-engineer"],
         "product-manager" => &["product-engineer", "designer-engineer", "revenue-engineer"],
         "revenue-engineer" => &["sales-engineer", "solutions-engineer", "product-manager"],
-        _ => &["software-engineer", "architecture-engineer", "validation-engineer"],
+        _ => &[
+            "software-engineer",
+            "architecture-engineer",
+            "validation-engineer",
+        ],
     }
 }
 

@@ -1,536 +1,694 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+//! Minimal terminal renderer for Sapphire control.
+
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::internal::ui::shimmer::{prefix_glyph_span, shimmer_spans};
-use crate::internal::ui::theme::theme_main::SapphireTheme;
+use super::state::*;
+use super::widgets::*;
+use std::time::Instant;
 
-use super::data::{DashboardSnapshot, WorkerView};
-use super::state::{DashboardState, SidebarTab};
-use super::widgets::{
-    badge, bullet_line, key_value, muted_line, rule_line, section_header, truncate_line,
-};
+use crate::internal::ui::shimmer::current_spinner_frame;
+use crate::internal::ui::theme::unicode::Symbol;
+
+const TIMER_COLOR: Color = Color::Rgb(226, 232, 240);
+const WARNING_ORANGE: Color = Color::Rgb(251, 146, 60);
+const SHIMMER_BASE: Color = Color::Rgb(191, 219, 254);
+const SHIMMER_HOT: Color = Color::Rgb(239, 246, 255);
+const SHIMMER_MID: Color = Color::Rgb(219, 234, 254);
+
+// One static instant for smooth time-based shimmer
+fn shimmer_start() -> &'static Instant {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now)
+}
+
+const LOADING_PHRASES: &[&str] = &[
+    "Updating live state",
+    "Refreshing agent sessions",
+    "Collecting terminal output",
+    "Checking review queue",
+    "Reading mission status",
+    "Syncing control surface",
+];
+
+const LOADING_PHRASE_INTERVAL_SECS: u64 = 6;
+
+fn loading_phrase(timer_seconds: u64) -> &'static str {
+    let phrase_index = (timer_seconds / LOADING_PHRASE_INTERVAL_SECS) as usize;
+    LOADING_PHRASES[phrase_index % LOADING_PHRASES.len()]
+}
 
 pub fn render(
     frame: &mut Frame<'_>,
-    state: &DashboardState,
-    snapshot: &DashboardSnapshot,
-    rendered_markdown: &Text<'static>,
-    theme: &SapphireTheme,
-    shimmer_frame: usize,
-    reduced_motion: bool,
+    snapshot: &RuntimeSnapshot,
+    timer_seconds: u64,
+    scroll: u16,
+    frame_count: usize,
+    show_quit_warning: bool,
 ) {
     let area = frame.area();
-    let layout = Layout::default()
+    let has_summary = snapshot.is_done && snapshot.execution_summary.final_summary.is_some();
+
+    let mut constraints = Vec::new();
+    constraints.push(Constraint::Length(3));
+    constraints.push(Constraint::Min(if has_summary { 10 } else { 14 }));
+    constraints.push(Constraint::Length(4));
+    if has_summary {
+        constraints.push(Constraint::Min(5));
+    }
+    constraints.push(Constraint::Length(1));
+
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(2),
-            Constraint::Min(12),
-            Constraint::Length(3),
-        ])
+        .margin(1)
+        .constraints(constraints)
         .split(area);
 
-    render_header(frame, layout[0], snapshot, theme, shimmer_frame, reduced_motion);
-    render_section_bar(frame, layout[1], state, theme);
-    render_body(frame, layout[2], state, snapshot, rendered_markdown, theme);
-    render_footer(frame, layout[3], state, snapshot, theme);
+    let mut idx = 0;
+    render_header(frame, chunks[idx], snapshot, timer_seconds);
+    idx += 1;
+    render_team(frame, chunks[idx], snapshot, scroll);
+    idx += 1;
+    render_control(frame, chunks[idx], snapshot);
+    idx += 1;
+    if has_summary {
+        render_summary(frame, chunks[idx], snapshot);
+        idx += 1;
+    }
+    render_footer(frame, chunks[idx], snapshot, timer_seconds, frame_count);
+
+    if show_quit_warning {
+        render_quit_warning(frame, area);
+    }
 }
 
 fn render_header(
     frame: &mut Frame<'_>,
     area: Rect,
-    snapshot: &DashboardSnapshot,
-    theme: &SapphireTheme,
-    shimmer_frame: usize,
-    reduced_motion: bool,
+    snapshot: &RuntimeSnapshot,
+    timer_seconds: u64,
 ) {
-    let mut brand = vec![
-        prefix_glyph_span(shimmer_frame, reduced_motion, None),
-        Span::raw(" "),
-    ];
-    brand.extend(shimmer_spans("Sapphire"));
-
-    let mission_line = if snapshot.mission_status.eq_ignore_ascii_case("launching")
-        && snapshot.worker_agent_count == 0
-    {
-        let mut line = vec![
-            prefix_glyph_span(shimmer_frame, reduced_motion, None),
-            Span::raw(" "),
-        ];
-        line.extend(shimmer_spans("Planning worker packets"));
-        Line::from(line)
-    } else {
-        Line::from(Span::styled(
-            truncate_line(&snapshot.mission_rewrite, area.width.saturating_sub(6) as usize),
-            theme.surfaces.header.mission,
-        ))
+    let status = snapshot.mission_status.as_str();
+    let status_color = match status {
+        "running" | "launching" => PURPLE,
+        "completed" => GREEN,
+        "failed" => RED,
+        "planning" => PURPLE,
+        _ => GRAY,
     };
 
-    let meta_line = Line::from(vec![
-        Span::styled("status ", theme.surfaces.panel.dimmed),
-        Span::styled(snapshot.mission_status.clone(), theme.badge_style(&snapshot.mission_status)),
-        Span::styled("  team ", theme.surfaces.panel.dimmed),
+    let supervisor_count = snapshot
+        .supervisors
+        .len()
+        .max(snapshot.supervisor.iter().count());
+    let wd = &snapshot.watchdog;
+
+    let mut top = vec![
         Span::styled(
-            snapshot.worker_agent_count.to_string(),
-            theme.surfaces.header.meta_value,
+            "Sapphire",
+            Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  elapsed ", theme.surfaces.panel.dimmed),
-        Span::styled(snapshot.elapsed_label.clone(), theme.surfaces.header.timer),
-    ]);
+        Span::styled("  ", Style::default()),
+        Span::styled(format!("{} ", Symbol::Info), Style::default().fg(status_color)),
+        Span::styled(
+            status.to_ascii_uppercase(),
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("{} elapsed", format_clock(timer_seconds)),
+            Style::default().fg(TIMER_COLOR),
+        ),
+    ];
 
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.frame.subtle_rule);
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(brand), mission_line, meta_line]).block(block),
-        area,
-    );
-}
-
-fn render_section_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &DashboardState,
-    theme: &SapphireTheme,
-) {
-    let mut spans = Vec::new();
-    for (index, section) in SidebarTab::ALL.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  ", theme.surfaces.panel.dimmed));
-        }
-        let label = format!("[{}] {}", section.hotkey(), section.label());
-        let style = if *section == state.active_section {
-            theme.surfaces.panel.title
-        } else {
-            theme.surfaces.panel.dimmed
-        };
-        spans.push(Span::styled(label, style));
+    if snapshot.problem_agent_count() > 0 {
+        top.push(Span::styled("  ", Style::default()));
+        top.push(Span::styled(
+            format!("{} attention", snapshot.problem_agent_count()),
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        ));
     }
 
+    let bottom = vec![
+        Span::styled("Supervisors ", Style::default().fg(DARK)),
+        Span::styled(supervisor_count.to_string(), Style::default().fg(WHITE)),
+        Span::styled("  Agents ", Style::default().fg(DARK)),
+        Span::styled(
+            snapshot.agent_count().to_string(),
+            Style::default().fg(WHITE),
+        ),
+        Span::styled("  Working ", Style::default().fg(DARK)),
+        Span::styled(
+            snapshot.active_agent_count().to_string(),
+            Style::default().fg(WHITE),
+        ),
+        Span::styled("  Review ", Style::default().fg(DARK)),
+        Span::styled(
+            wd.validation_queue.len().to_string(),
+            Style::default().fg(PURPLE),
+        ),
+        Span::styled("  Mail ", Style::default().fg(DARK)),
+        Span::styled(wd.mail_routed.to_string(), Style::default().fg(WHITE)),
+        Span::styled("  Stalls ", Style::default().fg(DARK)),
+        Span::styled(
+            wd.stall_interventions.to_string(),
+            Style::default().fg(if wd.stall_interventions > 0 {
+                YELLOW
+            } else {
+                WHITE
+            }),
+        ),
+    ];
+
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::BOTTOM).border_style(theme.frame.subtle_rule)),
+        Paragraph::new(vec![
+            Line::from(top),
+            Line::from(bottom),
+            Line::from(Span::styled(
+                "─".repeat(area.width.saturating_sub(1) as usize),
+                Style::default().fg(BORDER),
+            )),
+        ]),
         area,
     );
 }
 
-fn render_body(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &DashboardState,
-    snapshot: &DashboardSnapshot,
-    rendered_markdown: &Text<'static>,
-    theme: &SapphireTheme,
-) {
-    let width = area.width.saturating_sub(2) as usize;
-    let lines = build_body_lines(state, snapshot, rendered_markdown, theme, width);
+fn render_team(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot, scroll: u16) {
+    let mut lines = vec![section_title("People")];
+
+    let mut supervisors = snapshot.supervisors.clone();
+    if supervisors.is_empty() {
+        if let Some(supervisor) = snapshot.supervisor.clone() {
+            supervisors.push(supervisor);
+        }
+    }
+    supervisors.sort_by(|left, right| {
+        right
+            .is_active_supervisor
+            .cmp(&left.is_active_supervisor)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    if supervisors.is_empty() && snapshot.agents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Awaiting agent launch",
+            Style::default().fg(GRAY),
+        )));
+    } else {
+        if !supervisors.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Supervisors",
+                Style::default().fg(DARK).add_modifier(Modifier::BOLD),
+            )));
+        }
+        for supervisor in &supervisors {
+            let workers: Vec<_> = snapshot
+                .agents
+                .iter()
+                .filter(|agent| agent.owner_supervisor.as_deref() == Some(supervisor.name.as_str()))
+                .collect();
+            lines.push(render_supervisor_row(supervisor, &workers));
+        }
+
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Agents",
+            Style::default().fg(DARK).add_modifier(Modifier::BOLD),
+        )));
+        let mut agents = snapshot.agents.clone();
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
+        for agent in &agents {
+            let (dot, color) = status_dot(agent.status);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{dot} "),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    truncate(&agent.name, 18),
+                    Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {}", pretty_status(agent.status)),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    format!(" · {}", short_role(&agent.display_role, 18)),
+                    Style::default().fg(DARK),
+                ),
+            ]));
+        }
+    }
+
+    if area.width >= 110 && !snapshot.agents.is_empty() {
+        lines.push(Line::default());
+        lines.push(section_title("Work"));
+        lines.extend(render_agent_matrix(snapshot, area.width as usize));
+    }
+
+    let wd = &snapshot.watchdog;
+    if !wd.blocked.is_empty()
+        || !wd.contradictions.is_empty()
+        || !wd.mail_pressure.is_empty()
+        || !wd.crash_loop_sessions.is_empty()
+    {
+        lines.push(Line::default());
+        lines.push(section_title("Attention"));
+        if !wd.blocked.is_empty() {
+            lines.push(kv_yellow("blocked", &wd.blocked.join(", ")));
+        }
+        if !wd.contradictions.is_empty() {
+            lines.push(kv_red("conflicts", &wd.contradictions.join(", ")));
+        }
+        if !wd.mail_pressure.is_empty() {
+            lines.push(kv_yellow("mail", &wd.mail_pressure.join(", ")));
+        }
+        if !wd.crash_loop_sessions.is_empty() {
+            lines.push(kv_red("crash loops", &wd.crash_loop_sessions.join(", ")));
+        }
+    }
+
+    if !wd.pods.is_empty() || !snapshot.mail_threads.is_empty() || !snapshot.meetings.is_empty() {
+        lines.push(Line::default());
+        lines.push(section_title("Coordination"));
+        for pod in wd.pods.iter().take(4) {
+            let blocked = if pod.blocked_members.is_empty() {
+                String::new()
+            } else {
+                format!(" blocked:{}", pod.blocked_members.join(", "))
+            };
+            lines.push(kv(
+                &pod.name,
+                &format!(
+                    "{}{} [{} threads]",
+                    pod.members.join(", "),
+                    blocked,
+                    pod.open_threads
+                ),
+            ));
+        }
+        for thread in snapshot
+            .mail_threads
+            .iter()
+            .filter(|thread| matches!(thread.state.as_str(), "open" | "routed" | "pending"))
+            .take(3)
+        {
+            lines.push(kv(
+                "mail",
+                &format!(
+                    "{} -> {} · {}",
+                    thread.from,
+                    thread.to,
+                    truncate(&thread.subject, 56)
+                ),
+            ));
+        }
+    }
+
     frame.render_widget(
         Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((state.scroll, 0)),
+            .wrap(Wrap { trim: true })
+            .scroll((scroll, 0)),
         area,
     );
 }
 
-fn build_body_lines(
-    state: &DashboardState,
-    snapshot: &DashboardSnapshot,
-    rendered_markdown: &Text<'static>,
-    theme: &SapphireTheme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    lines.push(section_header(theme, "Overview"));
-    lines.push(rule_line(theme, width));
-    lines.push(key_value(theme, "Mission", &snapshot.mission_rewrite));
-    lines.push(key_value(
-        theme,
-        "Supervisor mode",
-        &snapshot.watchdog.supervisor_mode,
-    ));
-    lines.push(key_value(
-        theme,
-        "Validation queue",
-        &snapshot.health.validation_queue.to_string(),
-    ));
-    lines.push(key_value(
-        theme,
-        "Blocked",
-        &snapshot.health.blocked.to_string(),
-    ));
-    lines.push(key_value(
-        theme,
-        "Contradictions",
-        &snapshot.health.contradictions.to_string(),
-    ));
-    lines.push(muted_line(theme, format!("Watchdog {}", snapshot.health.watchdog_line)));
-    lines.push(Line::default());
-
-    lines.push(section_header(theme, "Team Snapshot"));
-    lines.push(rule_line(theme, width));
-    if snapshot.workers.is_empty() {
-        lines.push(muted_line(theme, "No workers yet."));
-    } else {
-        for worker in &snapshot.workers {
-            lines.extend(render_worker_summary(worker, theme));
-        }
-    }
-    lines.push(Line::default());
-
-    lines.push(section_header(theme, "Problems"));
-    lines.push(rule_line(theme, width));
-    lines.extend(render_problem_summary(snapshot, theme));
-    lines.push(Line::default());
-
-    lines.push(section_header(theme, "Watchdog Summary"));
-    lines.push(rule_line(theme, width));
-    lines.extend(render_watchdog_summary(snapshot, theme));
-    lines.push(Line::default());
-
-    lines.push(section_header(theme, "Supervisor Snapshot"));
-    lines.push(rule_line(theme, width));
-    lines.extend(render_supervisor_preview(snapshot, theme));
-    lines.push(Line::default());
-
-    let detail_title = format!("Detail · {}", state.active_section.label());
-    lines.push(section_header(theme, &detail_title));
-    lines.push(rule_line(theme, width));
-    lines.extend(render_detail_section(
-        state.active_section,
-        snapshot,
-        rendered_markdown,
-        theme,
-    ));
-
-    lines
-}
-
-fn render_worker_summary(worker: &WorkerView, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    lines.push(badge(theme, &worker.name, &worker.state));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-                format!("{}  {}", worker.role, truncate_line(&worker.summary, 96)),
-                theme.surfaces.panel.body,
-            ),
-        ]));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("focus {}", truncate_line(&worker.focus, 88)),
-            theme.surfaces.panel.dimmed,
-        ),
-    ]));
-    if let Some(validation) = &worker.validation {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("validation {}", validation),
-                theme.surfaces.panel.dimmed,
-            ),
-        ]));
-    }
-    lines.push(Line::default());
-    lines
-}
-
-fn render_problem_summary(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    let problems: Vec<_> = snapshot
-        .workers
+fn render_supervisor_row(
+    supervisor: &AgentNode,
+    workers: &[&AgentNode],
+) -> Line<'static> {
+    let blocked = workers
+        .iter()
+        .filter(|worker| matches!(worker.status, AgentStatus::Blocked | AgentStatus::Stalled))
+        .count();
+    let validating = workers
         .iter()
         .filter(|worker| {
             matches!(
-                worker.state.as_str(),
-                "stalled"
-                    | "blocked"
-                    | "contradictory"
-                    | "failed"
-                    | "needs_retry"
-                    | "wrong_direction"
-            ) || worker.validation.as_deref() == Some("awaiting validation")
+                worker.status,
+                AgentStatus::DoneClaimed | AgentStatus::NeedsValidation
+            )
         })
-        .collect();
-
-    if problems.is_empty() {
-        return vec![muted_line(theme, "All clear. No workers currently need attention.")];
-    }
-
-    problems
-        .into_iter()
-        .flat_map(|worker| {
-            vec![
-                badge(theme, &worker.name, &worker.state),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        truncate_line(&worker.summary, 108),
-                        theme.surfaces.panel.body,
-                    ),
-                ]),
-            ]
-        })
-        .collect()
-}
-
-fn render_watchdog_summary(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    let wd = &snapshot.watchdog;
-    vec![
-        bullet_line(theme, "•", "mode", wd.supervisor_mode.clone()),
-        bullet_line(theme, "•", "directives", wd.directives_parsed.to_string()),
-        bullet_line(theme, "•", "mail", wd.mail_routed.to_string()),
-        bullet_line(
-            theme,
-            "•",
-            "validation",
-            wd.validation_challenges.to_string(),
-        ),
-        bullet_line(theme, "•", "stalls", wd.stall_interventions.to_string()),
-        bullet_line(theme, "•", "conflicts", wd.lease_conflicts.to_string()),
-        bullet_line(theme, "•", "reminders", wd.protocol_reminders.to_string()),
-        bullet_line(
-            theme,
-            "•",
-            "fallbacks",
-            wd.supervisor_fallbacks.to_string(),
-        ),
-    ]
-}
-
-fn render_supervisor_preview(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    let Some(supervisor) = &snapshot.supervisor else {
-        return vec![muted_line(theme, "Supervisor not attached yet.")];
+        .count();
+    let label = if supervisor.is_active_supervisor {
+        "Active"
+    } else if supervisor.is_standby {
+        "Standby"
+    } else {
+        "Branch"
     };
+    let (_, color) = status_dot(supervisor.status);
+    Line::from(vec![
+        Span::styled("● ", Style::default().fg(color)),
+        Span::styled(
+            supervisor.name.clone(),
+            Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" · {label}"), Style::default().fg(color)),
+        Span::styled(
+            format!(" · {} agents", workers.len()),
+            Style::default().fg(DARK),
+        ),
+        Span::styled(format!(" · {blocked} blocked"), Style::default().fg(DARK)),
+        Span::styled(
+            format!(" · {validating} in review"),
+            Style::default().fg(DARK),
+        ),
+    ])
+}
+
+fn render_agent_matrix(snapshot: &RuntimeSnapshot, width: usize) -> Vec<Line<'static>> {
+    let name_w = 14;
+    let role_w = 10;
+    let status_w = 12;
+    let owner_w = 14;
+    let task_w = width
+        .saturating_sub(name_w + role_w + status_w + owner_w + 12)
+        .max(16);
 
     let mut lines = vec![
-        badge(theme, &supervisor.name, &supervisor.state),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                truncate_line(&supervisor.summary, 120),
-                theme.surfaces.panel.body,
+        Line::from(Span::styled(
+            format!(
+                "{:<name_w$}  {:<role_w$}  {:<status_w$}  {:<owner_w$}  {}",
+                "Agent",
+                "Role",
+                "State",
+                "Owner",
+                "Focus",
+                name_w = name_w,
+                role_w = role_w,
+                status_w = status_w,
+                owner_w = owner_w,
             ),
-        ]),
+            Style::default().fg(DARK).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "─".repeat(width.saturating_sub(2)),
+            Style::default().fg(BORDER),
+        )),
     ];
 
-    if supervisor.pending_decisions.is_empty() {
-        lines.push(muted_line(theme, "No pending supervisor decisions."));
-    } else {
-        lines.push(muted_line(theme, "Pending decisions:"));
-        for item in &supervisor.pending_decisions {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("• ", theme.surfaces.panel.accent),
-                Span::styled(item.clone(), theme.surfaces.panel.body),
-            ]));
-        }
-    }
-    lines
-}
-
-fn render_detail_section(
-    section: SidebarTab,
-    snapshot: &DashboardSnapshot,
-    rendered_markdown: &Text<'static>,
-    theme: &SapphireTheme,
-) -> Vec<Line<'static>> {
-    match section {
-        SidebarTab::Workers => render_workers_detail(snapshot, theme),
-        SidebarTab::Problems => render_problems_detail(snapshot, theme),
-        SidebarTab::Watchdog => render_watchdog_detail(snapshot, theme),
-        SidebarTab::Events => render_events_detail(snapshot, theme),
-        SidebarTab::Supervisor => render_supervisor_detail(snapshot, rendered_markdown, theme),
-    }
-}
-
-fn render_workers_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    if snapshot.workers.is_empty() {
-        return vec![muted_line(theme, "No workers yet.")];
-    }
-
-    let mut lines = Vec::new();
-    for worker in &snapshot.workers {
-        lines.push(badge(theme, &worker.name, &worker.state));
+    let mut agents = snapshot.agents.clone();
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    for agent in agents.iter().take(12) {
+        let status = pretty_status(agent.status);
+        let owner = agent
+            .owner_supervisor
+            .clone()
+            .unwrap_or_else(|| "unassigned".to_owned());
         lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<name_w$}", truncate(&agent.name, name_w)),
+                Style::default().fg(WHITE),
+            ),
             Span::raw("  "),
             Span::styled(
-                format!("{} · {}", worker.role, worker.summary),
-                theme.surfaces.panel.body,
+                format!("{:<role_w$}", short_role(&agent.display_role, role_w)),
+                Style::default().fg(DARK),
             ),
-        ]));
-        lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("focus {}", worker.focus),
-                theme.surfaces.panel.dimmed,
+                format!("{:<status_w$}", truncate(status, status_w)),
+                Style::default().fg(status_color(agent.status)),
             ),
-        ]));
-        if let Some(validation) = &worker.validation {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("validation ", theme.surfaces.panel.dimmed),
-                Span::styled(validation.clone(), theme.badge_style(validation)),
-            ]));
-        }
-        lines.push(Line::default());
-    }
-    lines
-}
-
-fn render_problems_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    let problems: Vec<_> = snapshot
-        .workers
-        .iter()
-        .filter(|worker| {
-            matches!(
-                worker.state.as_str(),
-                "stalled"
-                    | "blocked"
-                    | "contradictory"
-                    | "failed"
-                    | "needs_retry"
-                    | "wrong_direction"
-            ) || worker.validation.as_deref() == Some("awaiting validation")
-        })
-        .collect();
-
-    if problems.is_empty() {
-        return vec![muted_line(theme, "All clear. No workers currently need attention.")];
-    }
-
-    let mut lines = Vec::new();
-    for worker in problems {
-        lines.push(badge(theme, &worker.name, &worker.state));
-        lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(worker.summary.clone(), theme.surfaces.panel.body),
+            Span::styled(
+                format!("{:<owner_w$}", truncate(&owner, owner_w)),
+                Style::default().fg(PURPLE_SOFT),
+            ),
+            Span::raw("  "),
+            Span::styled(first_task(agent, task_w), Style::default().fg(GRAY)),
         ]));
-        if let Some(validation) = &worker.validation {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("validation ", theme.surfaces.panel.dimmed),
-                Span::styled(validation.clone(), theme.badge_style(validation)),
-            ]));
-        }
-        lines.push(Line::default());
     }
     lines
 }
 
-fn render_watchdog_detail(snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
+fn render_control(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot) {
     let wd = &snapshot.watchdog;
-    vec![
-        key_value(theme, "Supervisor mode", &wd.supervisor_mode),
-        key_value(theme, "Runtime events", &wd.runtime_events.to_string()),
-        key_value(theme, "Directives parsed", &wd.directives_parsed.to_string()),
-        key_value(theme, "Mail routed", &wd.mail_routed.to_string()),
-        key_value(
-            theme,
-            "Validation challenges",
-            &wd.validation_challenges.to_string(),
+    let mut lines = vec![section_title("System")];
+    lines.push(Line::from(vec![
+        Span::styled("mode ", Style::default().fg(DARK)),
+        Span::styled(
+            snapshot.execution_summary.supervisor_mode.clone(),
+            Style::default().fg(if snapshot.execution_summary.supervisor_mode == "healthy" {
+                GREEN
+            } else {
+                YELLOW
+            }),
         ),
-        key_value(
-            theme,
-            "Stall interventions",
-            &wd.stall_interventions.to_string(),
+        Span::styled(" · review ", Style::default().fg(DARK)),
+        Span::styled(
+            wd.validation_queue.len().to_string(),
+            Style::default().fg(PURPLE),
         ),
-        key_value(theme, "Lease conflicts", &wd.lease_conflicts.to_string()),
-        key_value(
-            theme,
-            "Protocol reminders",
-            &wd.protocol_reminders.to_string(),
+        Span::styled(" · blocked ", Style::default().fg(DARK)),
+        Span::styled(wd.blocked.len().to_string(), Style::default().fg(YELLOW)),
+        Span::styled(" · contradictions ", Style::default().fg(DARK)),
+        Span::styled(
+            wd.contradictions.len().to_string(),
+            Style::default().fg(RED),
         ),
-        key_value(
-            theme,
-            "Supervisor health events",
-            &wd.supervisor_health_events.to_string(),
-        ),
-        key_value(
-            theme,
-            "Supervisor fallbacks",
-            &wd.supervisor_fallbacks.to_string(),
-        ),
-    ]
-}
+    ]));
 
-fn render_events_detail(_snapshot: &DashboardSnapshot, theme: &SapphireTheme) -> Vec<Line<'static>> {
-    vec![muted_line(
-        theme,
-        "Live event logging is disabled in the dashboard to keep the control surface responsive.",
-    )]
-}
-
-fn render_supervisor_detail(
-    snapshot: &DashboardSnapshot,
-    rendered_markdown: &Text<'static>,
-    theme: &SapphireTheme,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if let Some(supervisor) = &snapshot.supervisor {
-        lines.push(badge(theme, &supervisor.name, &supervisor.state));
-        lines.push(Line::default());
+    if let Some(entry) = snapshot.supervisor_logs.last() {
+        lines.push(Line::from(vec![
+            Span::styled("Latest  ", Style::default().fg(DARK)),
+            Span::raw(" "),
+            Span::styled(
+                truncate(&entry.message, area.width.saturating_sub(10) as usize),
+                Style::default().fg(GRAY),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "No supervisor events yet".to_owned(),
+                Style::default().fg(GRAY),
+            ),
+        ]));
     }
 
-    if let Some(final_summary) = &snapshot.final_summary {
-        lines.push(section_header(theme, "Final Summary"));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+}
+
+fn render_summary(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot) {
+    let s = &snapshot.execution_summary;
+    let mut lines = vec![section_title("Summary")];
+    lines.push(kv("mission", &s.mission_rewrite));
+    lines.push(kv("deployed", &s.agents_deployed.to_string()));
+    lines.push(kv_green("completed", &s.agents_completed.to_string()));
+    if s.agents_failed > 0 {
+        lines.push(kv_red("failed", &s.agents_failed.to_string()));
+    }
+    lines.push(kv(
+        "mail",
+        &format!(
+            "{}/{} resolved",
+            s.mail_threads_resolved, s.mail_threads_total
+        ),
+    ));
+    lines.push(kv("conflicts", &s.lease_conflicts.to_string()));
+    lines.push(kv("stalls", &s.stall_interventions.to_string()));
+    if let Some(duration) = s.elapsed() {
+        lines.push(kv("elapsed", &format_duration(duration)));
+    }
+    if let Some(summary) = s.final_summary.as_ref() {
+        lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            final_summary.clone(),
-            theme.surfaces.panel.body,
+            truncate(summary, area.width.saturating_sub(4) as usize),
+            Style::default().fg(WHITE),
         )));
-        lines.push(Line::default());
     }
-
-    if rendered_markdown.lines.is_empty() {
-        lines.push(muted_line(theme, "Supervisor markdown is still empty."));
-        return lines;
-    }
-
-    lines.extend(rendered_markdown.lines.clone());
-    lines
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_footer(
     frame: &mut Frame<'_>,
     area: Rect,
-    state: &DashboardState,
-    snapshot: &DashboardSnapshot,
-    theme: &SapphireTheme,
+    snapshot: &RuntimeSnapshot,
+    timer_seconds: u64,
+    _frame_count: usize,
 ) {
-    let top = Line::from(vec![
-        Span::styled("section ", theme.surfaces.panel.dimmed),
-        Span::styled(
-            state.active_section.label().to_owned(),
-            theme.surfaces.panel.title,
-        ),
-        Span::styled("  elapsed ", theme.surfaces.panel.dimmed),
-        Span::styled(snapshot.elapsed_label.clone(), theme.surfaces.header.timer),
-        Span::styled("  workers ", theme.surfaces.panel.dimmed),
-        Span::styled(
-            snapshot.worker_agent_count.to_string(),
-            theme.surfaces.header.meta_value,
-        ),
-        Span::styled("  state ", theme.surfaces.panel.dimmed),
-        Span::styled(
-            snapshot.mission_status.clone(),
-            theme.badge_style(&snapshot.mission_status),
-        ),
-    ]);
+    let shimmer_text = loading_phrase(timer_seconds);
 
-    let bottom = if snapshot.done {
-        "tab cycle sections  j/k scroll  pgup/pgdn jump  q quit"
+    let mut spans = vec![Span::styled(
+        format!("{} ", current_spinner_frame()),
+        Style::default().fg(PURPLE),
+    )];
+    spans.extend(footer_shimmer_spans(shimmer_text));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        if snapshot.is_done {
+            "press q to close".to_owned()
+        } else {
+            "scroll j/k  ·  refresh r  ·  quit Ctrl+C".to_owned()
+        },
+        Style::default().fg(DARK),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_quit_warning(frame: &mut Frame<'_>, area: Rect) {
+    let warning_area = Rect {
+        x: 1,
+        y: area.height.saturating_sub(2),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", Symbol::Warning),
+                Style::default()
+                    .fg(WARNING_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Press Ctrl+C again to quit",
+                Style::default()
+                    .fg(WARNING_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        warning_area,
+    );
+}
+
+fn footer_shimmer_spans(text: &str) -> Vec<Span<'static>> {
+    let chars: Vec<_> = text.chars().collect();
+    let len = chars.len().max(1);
+    // Time-based sweep: one full pass every 1.8 seconds — ultra smooth, zero jitter
+    let elapsed_ms = shimmer_start().elapsed().as_millis() as usize;
+    let period_ms = 1800;
+    let hot = ((elapsed_ms % period_ms) * len) / period_ms;
+    // Very wide shimmer — covers ~50% of text at any point
+    let band = (len / 2).max(3);
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let dist = if i >= hot { i - hot } else { len - (hot - i) };
+            let color = if dist <= 1 {
+                SHIMMER_HOT
+            } else if dist <= band {
+                SHIMMER_MID
+            } else if dist <= band + 2 {
+                SHIMMER_BASE
+            } else {
+                WHITE
+            };
+            Span::styled(ch.to_string(), Style::default().fg(color))
+        })
+        .collect()
+}
+
+fn pretty_status(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Booting => "Booting",
+        AgentStatus::NotStarted => "Queued",
+        AgentStatus::Progressing => "Working",
+        AgentStatus::Blocked => "Blocked",
+        AgentStatus::Stalled => "Stalled",
+        AgentStatus::DoneClaimed => "Done Claimed",
+        AgentStatus::NeedsValidation => "Reviewing",
+        AgentStatus::WeakOutput => "Weak",
+        AgentStatus::WrongDirection => "Drift",
+        AgentStatus::Contradictory => "Conflict",
+        AgentStatus::NeedsRetry => "Waiting",
+        AgentStatus::Validated => "Done",
+        AgentStatus::Failed => "Failed",
+        AgentStatus::Exited => "Exited",
+    }
+}
+
+fn first_task(agent: &AgentNode, width: usize) -> String {
+    let source = if !agent.explicit_task.trim().is_empty() {
+        &agent.explicit_task
+    } else if !agent.owned_scope.trim().is_empty() {
+        &agent.owned_scope
+    } else if !agent.summary.trim().is_empty() {
+        &agent.summary
     } else {
-        "tab cycle sections  j/k scroll  pgup/pgdn jump  q waits until mission completes"
+        "-"
+    };
+    truncate(
+        &source.split_whitespace().collect::<Vec<_>>().join(" "),
+        width.max(8),
+    )
+}
+
+fn short_role(role: &str, width: usize) -> String {
+    let compact = role.split_whitespace().next().unwrap_or(role);
+    truncate(compact, width)
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+fn format_clock(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{secs:02}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+pub fn render_exit_banner(snapshot: &RuntimeSnapshot, timer_seconds: u64) -> Vec<String> {
+    let agent_count = snapshot.agent_count();
+    let completed = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.status == AgentStatus::Validated)
+        .count();
+    let failed = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent.status == AgentStatus::Failed)
+        .count();
+
+    let status_line = if completed > 0 && failed == 0 {
+        format!(
+            "{agent_count} agent{} completed in {}",
+            if agent_count == 1 { "" } else { "s" },
+            format_duration(std::time::Duration::from_secs(timer_seconds)),
+        )
+    } else if failed > 0 {
+        format!("{completed} of {agent_count} completed, {failed} failed")
+    } else {
+        format!(
+            "{agent_count} agent{} tracked for {}",
+            if agent_count == 1 { "" } else { "s" },
+            format_duration(std::time::Duration::from_secs(timer_seconds)),
+        )
     };
 
-    frame.render_widget(
-        Paragraph::new(vec![top, Line::from(Span::styled(bottom, theme.footer_hint()))]).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(theme.frame.subtle_rule),
-        ),
-        area,
-    );
+    let mut lines = vec![String::new(), format!("  session closed  ·  {status_line}")];
+    if !snapshot.execution_summary.mission_rewrite.is_empty() {
+        lines.push(format!(
+            "  mission: {}",
+            truncate(&snapshot.execution_summary.mission_rewrite, 80)
+        ));
+    }
+    lines.push(String::new());
+    lines
 }

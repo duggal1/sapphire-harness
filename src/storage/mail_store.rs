@@ -25,7 +25,9 @@ impl MailStore {
     }
 
     pub fn mission_file(&self, mission_id: &Uuid) -> PathBuf {
-        self.base_dir.join(mission_id.to_string()).join("mail.jsonl")
+        self.base_dir
+            .join(mission_id.to_string())
+            .join("mail.jsonl")
     }
 
     pub fn persist_message(&self, mission_id: &Uuid, message: &MailRecord) -> Result<()> {
@@ -57,7 +59,12 @@ impl MailStore {
         Ok(())
     }
 
-    pub fn update_message_status(&self, _message_id: &Uuid, status: &str, ack_state: &str) -> Result<()> {
+    pub fn update_message_status(
+        &self,
+        _message_id: &Uuid,
+        status: &str,
+        ack_state: &str,
+    ) -> Result<()> {
         // Append an update line — read-time merge applies latest
         let update = serde_json::json!({
             "type": "mail_update",
@@ -93,8 +100,10 @@ impl MailStore {
                     continue;
                 }
                 let status = val.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                let created = val.get("created_at")
-                    .and_then(|v| serde_json::from_str::<chrono::DateTime<chrono::Utc>>(v.as_str().unwrap_or("")).ok());
+                let created = val.get("created_at").and_then(|v| {
+                    serde_json::from_str::<chrono::DateTime<chrono::Utc>>(v.as_str().unwrap_or(""))
+                        .ok()
+                });
 
                 if (status == "acked" || status == "responded" || status == "done")
                     && val.get("pinned").and_then(|v| v.as_bool()) == Some(false)
@@ -156,7 +165,8 @@ impl MailStore {
                     }
                 }
                 if let Some(fw) = from_worker {
-                    let from = val.get("from_worker_id")
+                    let from = val
+                        .get("from_worker_id")
                         .and_then(|v| v.as_str())
                         .and_then(|s| Uuid::parse_str(s).ok());
                     if from != Some(fw) {
@@ -192,7 +202,12 @@ impl MailStore {
         Ok(results)
     }
 
-    pub fn claim_scavenge_mail(&self, mail_id: &Uuid, claimer_id: &Uuid, claimer_name: &str) -> Result<usize> {
+    pub fn claim_scavenge_mail(
+        &self,
+        mail_id: &Uuid,
+        claimer_id: &Uuid,
+        claimer_name: &str,
+    ) -> Result<usize> {
         // Scan all mission files for this mail
         if !self.base_dir.exists() {
             return Ok(0);
@@ -217,7 +232,10 @@ impl MailStore {
                 for line in reader.lines() {
                     let line = line?;
                     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let id = val.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+                        let id = val
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok());
                         if id == Some(*mail_id)
                             && val.get("message_type").and_then(|v| v.as_str()) == Some("scavenge")
                             && val.get("claimed_by").is_none()
@@ -274,7 +292,10 @@ impl MailStore {
                 for line in reader.lines() {
                     let line = line?;
                     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let id = val.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+                        let id = val
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok());
                         let claimed_by = val.get("claimed_by").and_then(|v| v.as_str());
                         if id == Some(*mail_id) && claimed_by == Some(&releaser_id.to_string()) {
                             val.as_object_mut().map(|obj| {
@@ -325,7 +346,8 @@ impl MailStore {
             let entry = entry?;
             if entry.file_type().map_or(false, |ft| ft.is_dir()) {
                 let mission_dir = entry.path();
-                let mission_id = mission_dir.file_name()
+                let mission_id = mission_dir
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .and_then(|s| Uuid::parse_str(s).ok())
                     .unwrap_or_default();
@@ -340,25 +362,85 @@ impl MailStore {
                 for line in reader.lines() {
                     let line = line?;
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let id = val.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+                        let id = val
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Uuid::parse_str(s).ok());
                         if id == Some(*mail_id) {
                             return Ok(Some(MailRecord {
-                                id: val.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default(),
+                                id: val
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| Uuid::parse_str(s).ok())
+                                    .unwrap_or_default(),
                                 mission_id,
-                                sender_worker_id: val.get("from_worker_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default(),
-                                recipient_worker_id: val.get("to_worker_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default(),
-                                message_type: val.get("message_type").and_then(|v| v.as_str()).unwrap_or("notification").to_owned(),
-                                priority: val.get("priority").and_then(|v| v.as_str()).unwrap_or("normal").to_owned(),
-                                delivery_mode: val.get("delivery_mode").and_then(|v| v.as_str()).unwrap_or("queue").to_owned(),
-                                subject: val.get("subject").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                                status: val.get("status").and_then(|v| v.as_str()).unwrap_or("routed").to_owned(),
-                                ack_state: val.get("ack_state").and_then(|v| v.as_str()).unwrap_or("pending").to_owned(),
-                                pinned: val.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
-                                body_json: val.get("body").and_then(|v| v.as_str()).unwrap_or("{}").to_owned(),
-                                thread_id: val.get("thread_id").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                                reply_to: val.get("reply_to").and_then(|v| v.as_str()).map(String::from),
-                                created_at: val.get("created_at").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| chrono::Utc::now()),
-                                archived_at: val.get("archived_at").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str(s).ok()),
+                                sender_worker_id: val
+                                    .get("from_worker_id")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| Uuid::parse_str(s).ok())
+                                    .unwrap_or_default(),
+                                recipient_worker_id: val
+                                    .get("to_worker_id")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| Uuid::parse_str(s).ok())
+                                    .unwrap_or_default(),
+                                message_type: val
+                                    .get("message_type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("notification")
+                                    .to_owned(),
+                                priority: val
+                                    .get("priority")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("normal")
+                                    .to_owned(),
+                                delivery_mode: val
+                                    .get("delivery_mode")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("queue")
+                                    .to_owned(),
+                                subject: val
+                                    .get("subject")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                status: val
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("routed")
+                                    .to_owned(),
+                                ack_state: val
+                                    .get("ack_state")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("pending")
+                                    .to_owned(),
+                                pinned: val
+                                    .get("pinned")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false),
+                                body_json: val
+                                    .get("body")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("{}")
+                                    .to_owned(),
+                                thread_id: val
+                                    .get("thread_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                reply_to: val
+                                    .get("reply_to")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                created_at: val
+                                    .get("created_at")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                                    .unwrap_or_else(|| chrono::Utc::now()),
+                                archived_at: val
+                                    .get("archived_at")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| serde_json::from_str(s).ok()),
                             }));
                         }
                     }

@@ -1,10 +1,10 @@
 mod adapter;
 mod agent;
 mod cli;
-mod color;
 mod git;
 mod internal;
 mod model;
+mod no_supervisor;
 mod orchestrator;
 mod protocol;
 mod runtime;
@@ -12,7 +12,6 @@ mod runtime;
 mod storage;
 mod store; // Deprecated — backward compat alias, will be removed
 mod templates;
-mod terminal_palette;
 mod tmux;
 mod tui;
 
@@ -20,6 +19,8 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, CliAction};
 use orchestrator::Orchestrator;
+use std::fs;
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -67,8 +68,9 @@ async fn main() -> Result<()> {
 
             let state_path = config.state_dir.clone();
             let control_status = config.state_dir.join("control/status.txt");
-            let use_teamwork =
-                config.tmux && tui::run_enabled_for_launch(config.dry_run) && tmux::Tmux::is_available();
+            let use_teamwork = config.tmux
+                && tui::run_enabled_for_launch(config.dry_run)
+                && tmux::Tmux::is_available();
             let use_tui = config.tui || (tui::run_enabled_for_launch(config.dry_run));
 
             if use_teamwork && !config.dry_run {
@@ -76,6 +78,7 @@ async fn main() -> Result<()> {
                     .tmux_session_name
                     .clone()
                     .expect("teamwork surface session name is always set");
+                seed_launch_status(&control_status, "Preparing launch")?;
                 let config_clone = config.clone();
                 let task = tokio::spawn(async move {
                     let orchestrator = Orchestrator::bootstrap(&config_clone)?;
@@ -97,13 +100,15 @@ async fn main() -> Result<()> {
                     tui::run_launch_dashboard(state_path, control_status, attach, task).await?;
                 println!("{}", summary.render());
             } else if use_tui && !config.dry_run {
+                seed_launch_status(&control_status, "Preparing launch")?;
                 let config_clone = config.clone();
                 let task = tokio::spawn(async move {
                     let orchestrator = Orchestrator::bootstrap(&config_clone)?;
                     orchestrator.launch(config_clone).await
                 });
                 let attach = tui::attach_for_repo(config.repo.clone(), chrono::Utc::now());
-                let summary = tui::run_launch_dashboard(state_path, control_status, attach, task).await?;
+                let summary =
+                    tui::run_launch_dashboard(state_path, control_status, attach, task).await?;
                 println!("{}", summary.render());
             } else {
                 let orchestrator = Orchestrator::bootstrap(&config)?;
@@ -111,10 +116,11 @@ async fn main() -> Result<()> {
                 println!("{}", summary.render());
             }
         }
-        CliAction::Status {
-            repo,
-            state_dir,
-        } => {
+        CliAction::NoSupervisorLaunch(config) => {
+            let summary = no_supervisor::launch(config).await?;
+            println!("{summary}");
+        }
+        CliAction::Status { repo, state_dir } => {
             let state_dir = state_dir.unwrap_or_else(|| repo.join(".sp"));
             let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_status()?);
@@ -122,10 +128,7 @@ async fn main() -> Result<()> {
         CliAction::Push { repo } => {
             git::push_current_branch(&repo)?;
         }
-        CliAction::Sessions {
-            repo,
-            state_dir,
-        } => {
+        CliAction::Sessions { repo, state_dir } => {
             let state_dir = state_dir.unwrap_or_else(|| repo.join(".sp"));
             let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_sessions()?);
@@ -160,13 +163,8 @@ async fn main() -> Result<()> {
                 .await?;
                 // External terminal is opened by the orchestrator inside run_live_mission.
                 let _ = tmux_ready;
-                let summary = tui::run_launch_dashboard(
-                    state_dir,
-                    control_status,
-                    attach,
-                    task,
-                )
-                .await?;
+                let summary =
+                    tui::run_launch_dashboard(state_dir, control_status, attach, task).await?;
                 println!("{}", summary.render());
             } else {
                 let orchestrator = Orchestrator::open(&state_dir)?;
@@ -174,22 +172,13 @@ async fn main() -> Result<()> {
                 println!("{}", summary.render());
             }
         }
-        CliAction::Replay {
-            mission_id,
-            limit,
-        } => {
-            let state_dir = std::env::current_dir()
-                .expect("cwd")
-                .join(".sp");
+        CliAction::Replay { mission_id, limit } => {
+            let state_dir = std::env::current_dir().expect("cwd").join(".sp");
             let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_replay(mission_id, limit)?);
         }
-        CliAction::Summary {
-            mission_id,
-        } => {
-            let state_dir = std::env::current_dir()
-                .expect("cwd")
-                .join(".sp");
+        CliAction::Summary { mission_id } => {
+            let state_dir = std::env::current_dir().expect("cwd").join(".sp");
             let orchestrator = Orchestrator::open(&state_dir)?;
             println!("{}", orchestrator.render_supervisor_summary(mission_id)?);
         }
@@ -198,9 +187,7 @@ async fn main() -> Result<()> {
             worker,
             limit,
         } => {
-            let state_dir = std::env::current_dir()
-                .expect("cwd")
-                .join(".sp");
+            let state_dir = std::env::current_dir().expect("cwd").join(".sp");
             let orchestrator = Orchestrator::open(&state_dir)?;
             println!(
                 "{}",
@@ -211,14 +198,47 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn seed_launch_status(path: &Path, summary: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lines = [
+        "Session: launch-pending".to_owned(),
+        format!("Updated: {}", chrono::Utc::now().to_rfc3339()),
+        "Workers: 0 | Directives: 0 | Mail: 0 | Validation: 0 | Stalls: 0 | Lease Conflicts: 0 | Protocol Reminders: 0 | Supervisor Health: 0 | Critical Failures: 0 | Crash Loops: 0".to_owned(),
+        format!("Supervisor: supervisor-01 [booting] {summary}"),
+        String::new(),
+        "Blocked: none".to_owned(),
+        "Validation Queue: none".to_owned(),
+        "Contradictions: none".to_owned(),
+        "Mail Pressure: none".to_owned(),
+        "Problems: none".to_owned(),
+        "Ownership Gaps: none".to_owned(),
+        "First-Status Incidents: none".to_owned(),
+        "Systemic Incidents: none".to_owned(),
+        "Crash Loops: none".to_owned(),
+        "Pods: none".to_owned(),
+        "Meetings: none".to_owned(),
+        String::new(),
+        "Supervisors".to_owned(),
+        format!(
+            "- supervisor-01 [booting] branch=planning agents=0 blocked=0 validating=0 summary=\"{summary}\""
+        ),
+        String::new(),
+        "Workers".to_owned(),
+    ];
+    fs::write(path, lines.join("\n"))?;
+    Ok(())
+}
+
 fn init_tracing(action: &CliAction) {
     let interactive = match action {
         CliAction::Run(config) => !config.dry_run && (config.tmux || config.tui),
         CliAction::Resume(config) => config.tmux || config.tui,
+        CliAction::NoSupervisorLaunch(_) => false,
         _ => false,
     };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

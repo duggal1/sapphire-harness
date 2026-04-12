@@ -4,10 +4,8 @@ use crate::cli::LaunchConfig;
 pub struct MissionProfile {
     /// Whether the mission requires multi-agent coordination (affects prompt content).
     pub coordination_focused: bool,
-    /// Always true — full safety nets are always enabled.
-    pub enable_repair_supervisor: bool,
-    /// Always true — supervisor health is always monitored.
-    pub enable_supervisor_health_recovery: bool,
+    /// Whether to run multiple active supervisors for scale.
+    pub enable_supervisor_team: bool,
     /// Always true — state cards always sent to supervisor.
     pub enable_state_cards: bool,
     /// Always true — protocol reminders always sent.
@@ -38,8 +36,7 @@ impl MissionProfile {
         // ALL safety nets always enabled. No "lean" mode. No cheaping out.
         Self {
             coordination_focused,
-            enable_repair_supervisor: true,
-            enable_supervisor_health_recovery: true,
+            enable_supervisor_team: true,
             enable_state_cards: true,
             enable_protocol_reminders: true,
             enable_health_probes: true,

@@ -44,10 +44,16 @@ impl AgentMemoryStore {
     }
 
     pub fn memory_file(&self, mission_id: &Uuid, display_name: &str) -> PathBuf {
-        self.mission_dir(mission_id).join(format!("{}.json", display_name))
+        self.mission_dir(mission_id)
+            .join(format!("{}.json", display_name))
     }
 
-    pub fn save_memory(&self, mission_id: &Uuid, display_name: &str, memory: &AgentMemory) -> Result<()> {
+    pub fn save_memory(
+        &self,
+        mission_id: &Uuid,
+        display_name: &str,
+        memory: &AgentMemory,
+    ) -> Result<()> {
         let dir = self.mission_dir(mission_id);
         std::fs::create_dir_all(&dir)?;
 
@@ -58,7 +64,11 @@ impl AgentMemoryStore {
         Ok(())
     }
 
-    pub fn load_memory(&self, mission_id: &Uuid, display_name: &str) -> Result<Option<AgentMemory>> {
+    pub fn load_memory(
+        &self,
+        mission_id: &Uuid,
+        display_name: &str,
+    ) -> Result<Option<AgentMemory>> {
         let file = self.memory_file(mission_id, display_name);
         if !file.exists() {
             return Ok(None);
@@ -77,7 +87,9 @@ impl AgentMemoryStore {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                let name = entry.file_name().to_string_lossy()
+                let name = entry
+                    .file_name()
+                    .to_string_lossy()
                     .strip_suffix(".json")
                     .map(String::from)
                     .unwrap_or_default();
@@ -116,7 +128,11 @@ impl AgentMemoryStore {
         }
     }
 
-    pub fn format_for_resume(&self, mission_id: &Uuid, display_name: &str) -> Result<Option<String>> {
+    pub fn format_for_resume(
+        &self,
+        mission_id: &Uuid,
+        display_name: &str,
+    ) -> Result<Option<String>> {
         match self.load_memory(mission_id, display_name)? {
             Some(m) => Ok(Some(format!(
                 "PREVIOUS SESSION MEMORY ({display_name}):\n\
@@ -132,7 +148,11 @@ impl AgentMemoryStore {
                 scope = m.owned_scope.join(", "),
                 files = m.files_touched.join(", "),
                 decisions = m.decisions.join("; "),
-                blockers = if m.blockers.is_empty() { "none".to_owned() } else { m.blockers.join("; ") },
+                blockers = if m.blockers.is_empty() {
+                    "none".to_owned()
+                } else {
+                    m.blockers.join("; ")
+                },
                 learnings = m.learnings.join("; "),
                 state = m.final_state,
                 summary = m.summary,
@@ -210,7 +230,12 @@ impl AgentMemoryStore {
         lines.push(format!("PREVIOUS SESSIONS ({display_name}):"));
 
         for (i, (_, memory)) in history.iter().enumerate() {
-            let mission_short = memory.mission_id.to_string().chars().take(8).collect::<String>();
+            let mission_short = memory
+                .mission_id
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>();
             lines.push(format!("\n  Session {mission_short}…:"));
             if !memory.owned_scope.is_empty() {
                 lines.push(format!("    Scope: {}", memory.owned_scope.join(", ")));

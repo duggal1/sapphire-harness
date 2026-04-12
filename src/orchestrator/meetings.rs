@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{coordination, write_string_to_file, ActiveSession, ControlSurface, PendingMail};
+use super::{ActiveSession, ControlSurface, PendingMail, coordination, write_string_to_file};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MeetingArtifact {
@@ -98,11 +98,10 @@ pub fn build_meetings(
         ) {
             continue;
         }
-        let id = hash(
-            format!("session:{}:{}", session.record.id, session.state.as_str()).as_bytes(),
-        )
-        .to_hex()
-        .to_string();
+        let id =
+            hash(format!("session:{}:{}", session.record.id, session.state.as_str()).as_bytes())
+                .to_hex()
+                .to_string();
         meetings.push(MeetingArtifact {
             id,
             kind: "worker_recovery".to_owned(),
@@ -140,38 +139,31 @@ pub fn write_meeting_artifacts(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("meetings");
-    let hidden_dir = control_surface.hidden_root.join("control/meetings");
 
-    for dir in [&visible_dir, &hidden_dir] {
-        fs::create_dir_all(dir)?;
-    }
+    fs::create_dir_all(&visible_dir)?;
 
     let current_ids = meetings
         .iter()
         .map(|meeting| format!("{}.json", meeting.id))
         .collect::<BTreeSet<_>>();
 
-    for dir in [&visible_dir, &hidden_dir] {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                if file_name == "meetings.json" {
-                    continue;
-                }
-                if !current_ids.contains(&file_name) {
-                    let _ = fs::remove_file(entry.path());
-                }
+    if let Ok(entries) = fs::read_dir(&visible_dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if file_name == "meetings.json" {
+                continue;
+            }
+            if !current_ids.contains(&file_name) {
+                let _ = fs::remove_file(entry.path());
             }
         }
     }
 
     let index = serde_json::to_string_pretty(&meetings)?;
     write_string_to_file(&visible_dir.join("meetings.json"), &index)?;
-    write_string_to_file(&hidden_dir.join("meetings.json"), &index)?;
     for meeting in &meetings {
         let rendered = serde_json::to_string_pretty(meeting)?;
         write_string_to_file(&visible_dir.join(format!("{}.json", meeting.id)), &rendered)?;
-        write_string_to_file(&hidden_dir.join(format!("{}.json", meeting.id)), &rendered)?;
     }
 
     Ok(meetings)

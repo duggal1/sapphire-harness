@@ -251,6 +251,7 @@ impl TmuxBackend {
         if let Some(parent) = transcript_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let _ = std::fs::remove_file(&transcript_path);
         let _ = OpenOptions::new()
             .create(true)
             .append(true)
@@ -267,11 +268,7 @@ impl TmuxBackend {
                 } else {
                     (
                         self.tmux
-                            .split_window(
-                                &self.session_name,
-                                &self.session_name,
-                                *spawned % 2 == 0,
-                            )
+                            .split_window(&self.session_name, &self.session_name, *spawned % 2 == 0)
                             .map_err(anyhow::Error::msg)?,
                         true,
                     )
@@ -420,11 +417,15 @@ impl SessionHandle for TmuxSessionHandle {
                 thread::sleep(Duration::from_millis(250));
             }
         }
-        self.tmux.send_enter(&self.pane_id).map_err(anyhow::Error::msg)
+        self.tmux
+            .send_enter(&self.pane_id)
+            .map_err(anyhow::Error::msg)
     }
 
     fn terminate(&self) -> Result<()> {
-        self.tmux.send_ctrl_c(&self.pane_id).map_err(anyhow::Error::msg)
+        self.tmux
+            .send_ctrl_c(&self.pane_id)
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -772,12 +773,16 @@ fn spawn_tmux_monitor(
             }
 
             if idle_ticks >= 2
-                && let Ok(PaneState { dead: true, exit_code }) = tmux.pane_state(&pane_id)
+                && let Ok(PaneState {
+                    dead: true,
+                    exit_code,
+                }) = tmux.pane_state(&pane_id)
             {
                 let _ = tx.send(RuntimeEvent::Exited {
                     session_id,
                     exit_code,
                 });
+                let _ = std::fs::remove_file(&transcript_path);
                 break;
             }
 
@@ -827,7 +832,8 @@ fn text_preview(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::BufferManager;
+    use super::{BufferManager, RunningSession, SubmitMode, format_terminal_submission};
+    use std::time::Duration;
 
     #[test]
     fn buffer_manager_appends_without_trim() {
@@ -852,6 +858,29 @@ mod tests {
         let emoji = "🦀".repeat(40); // 4-byte chars
         buf.append(&emoji);
         assert!(std::str::from_utf8(buf.as_str().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_session_helper_records_sent_prompts() {
+        let (session, probe) = RunningSession::test("Engineer-01", Duration::from_millis(5));
+        session.send_text("status").unwrap();
+        session.send_prompt("continue").unwrap();
+        assert_eq!(
+            probe.sent_texts(),
+            vec!["status".to_owned(), "continue\n".to_owned()]
+        );
+    }
+
+    #[test]
+    fn terminal_submission_formats_by_mode() {
+        assert_eq!(
+            format_terminal_submission(SubmitMode::LineFeed, "go"),
+            "go\n".to_owned()
+        );
+        assert_eq!(
+            format_terminal_submission(SubmitMode::CarriageReturn, "go"),
+            "go\r\n".to_owned()
+        );
     }
 
     #[test]

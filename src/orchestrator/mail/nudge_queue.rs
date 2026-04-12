@@ -13,7 +13,7 @@ use super::types::QueuedNudge;
 use crate::orchestrator::ActiveSession;
 
 const MAX_QUEUE_DEPTH: usize = 50;
-const STALE_CLAIM_SECS: u64 = 5 * 60;   // 5 min
+const STALE_CLAIM_SECS: u64 = 5 * 60; // 5 min
 
 fn queue_dir(state_dir: &Path, session_id: &str) -> PathBuf {
     let safe = session_id.replace(['/', '\\'], "_");
@@ -29,8 +29,11 @@ pub fn nudge_enqueue(state_dir: &Path, session_id: &str, nudge: QueuedNudge) -> 
         anyhow::bail!("nudge queue full ({}/{})", pending, MAX_QUEUE_DEPTH);
     }
     let safe_sender = nudge.sender.replace(['/', '\\'], "_");
-    let filename = format!("{}-{}.json",
-        nudge.timestamp.timestamp_nanos_opt().unwrap_or(0), safe_sender);
+    let filename = format!(
+        "{}-{}.json",
+        nudge.timestamp.timestamp_nanos_opt().unwrap_or(0),
+        safe_sender
+    );
     fs::write(dir.join(&filename), serde_json::to_string_pretty(&nudge)?)?;
     Ok(())
 }
@@ -39,7 +42,9 @@ pub fn nudge_enqueue(state_dir: &Path, session_id: &str, nudge: QueuedNudge) -> 
 /// Expired nudges are discarded. Orphaned .claimed files are requeued.
 pub fn nudge_drain(state_dir: &Path, session_id: &str) -> Result<Vec<QueuedNudge>> {
     let dir = queue_dir(state_dir, session_id);
-    if !dir.exists() { return Ok(Vec::new()); }
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
     let now = chrono::Utc::now();
 
     // Sweep orphaned .claimed files
@@ -51,7 +56,8 @@ pub fn nudge_drain(state_dir: &Path, session_id: &str) -> Result<Vec<QueuedNudge
                     if let Ok(modified_ts) = meta.modified() {
                         if modified_ts.elapsed().unwrap_or_default().as_secs() > STALE_CLAIM_SECS {
                             if let Some(base) = name.split(".claimed").next() {
-                                let _ = fs::rename(entry.path(), dir.join(format!("{}.json", base)));
+                                let _ =
+                                    fs::rename(entry.path(), dir.join(format!("{}.json", base)));
                             }
                         } else {
                             let _ = fs::remove_file(entry.path());
@@ -64,23 +70,35 @@ pub fn nudge_drain(state_dir: &Path, session_id: &str) -> Result<Vec<QueuedNudge
 
     let mut nudges = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
-        let mut files: Vec<_> = entries.filter_map(|e| e.ok())
+        let mut files: Vec<_> = entries
+            .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
             .collect();
         files.sort_by_key(|e| e.file_name());
         for entry in files {
             let path = entry.path();
             let claim = PathBuf::from(format!("{}.claimed", path.display()));
-            if fs::rename(&path, &claim).is_err() { continue; }
+            if fs::rename(&path, &claim).is_err() {
+                continue;
+            }
             let data = match fs::read_to_string(&claim) {
                 Ok(d) => d,
-                Err(_) => { let _ = fs::rename(&claim, &path); continue; }
+                Err(_) => {
+                    let _ = fs::rename(&claim, &path);
+                    continue;
+                }
             };
             let nudge: QueuedNudge = match serde_json::from_str(&data) {
                 Ok(n) => n,
-                Err(_) => { let _ = fs::remove_file(&claim); continue; }
+                Err(_) => {
+                    let _ = fs::remove_file(&claim);
+                    continue;
+                }
             };
-            if now > nudge.expires_at { let _ = fs::remove_file(&claim); continue; }
+            if now > nudge.expires_at {
+                let _ = fs::remove_file(&claim);
+                continue;
+            }
             nudges.push(nudge);
             let _ = fs::remove_file(&claim);
         }
@@ -91,30 +109,47 @@ pub fn nudge_drain(state_dir: &Path, session_id: &str) -> Result<Vec<QueuedNudge
 /// Count pending nudges without draining.
 pub fn nudge_pending_count(state_dir: &Path, session_id: &str) -> usize {
     let dir = queue_dir(state_dir, session_id);
-    if !dir.exists() { return 0; }
-    fs::read_dir(&dir).map(|e| e.filter_map(|x| x.ok())
-        .filter(|x| x.file_name().to_string_lossy().ends_with(".json")).count())
+    if !dir.exists() {
+        return 0;
+    }
+    fs::read_dir(&dir)
+        .map(|e| {
+            e.filter_map(|x| x.ok())
+                .filter(|x| x.file_name().to_string_lossy().ends_with(".json"))
+                .count()
+        })
         .unwrap_or(0)
 }
 
 /// Format nudges as <system-reminder> block for PTY injection.
 pub fn nudge_format_for_injection(nudges: &[QueuedNudge]) -> String {
-    if nudges.is_empty() { return String::new(); }
-    let (urgent, normal): (Vec<_>, Vec<_>) = nudges.iter()
-        .partition(|n| n.priority.eq_ignore_ascii_case("urgent") || n.priority.eq_ignore_ascii_case("critical"));
+    if nudges.is_empty() {
+        return String::new();
+    }
+    let (urgent, normal): (Vec<_>, Vec<_>) = nudges.iter().partition(|n| {
+        n.priority.eq_ignore_ascii_case("urgent") || n.priority.eq_ignore_ascii_case("critical")
+    });
     let mut lines = vec!["<system-reminder>".to_owned()];
     if !urgent.is_empty() {
         lines.push(format!("QUEUED NUDGE ({} urgent):\n", urgent.len()));
-        for n in &urgent { lines.push(format!("  [URGENT from {}] {}", n.sender, n.message)); }
+        for n in &urgent {
+            lines.push(format!("  [URGENT from {}] {}", n.sender, n.message));
+        }
         if !normal.is_empty() {
             lines.push(format!("\nPlus {} non-urgent nudge(s):", normal.len()));
-            for n in &normal { lines.push(format!("  [from {}] {}", n.sender, n.message)); }
+            for n in &normal {
+                lines.push(format!("  [from {}] {}", n.sender, n.message));
+            }
         }
         lines.push("\nHandle urgent nudges before continuing current work.".to_owned());
     } else {
         lines.push(format!("QUEUED NUDGE ({} message(s)):\n", normal.len()));
-        for n in &normal { lines.push(format!("  [from {}] {}", n.sender, n.message)); }
-        lines.push("\nBackground notification. Continue work unless nudge is higher priority.".to_owned());
+        for n in &normal {
+            lines.push(format!("  [from {}] {}", n.sender, n.message));
+        }
+        lines.push(
+            "\nBackground notification. Continue work unless nudge is higher priority.".to_owned(),
+        );
     }
     lines.push("</system-reminder>".to_owned());
     lines.join("\n")
@@ -128,9 +163,13 @@ pub fn drain_nudge_queues(
 ) -> HashMap<uuid::Uuid, String> {
     let mut injections = HashMap::new();
     for (session_id, session) in active_sessions {
-        if session.state.is_terminal() { continue; }
+        if session.state.is_terminal() {
+            continue;
+        }
         let nudges = nudge_drain(state_dir, &session.record.id.to_string()).unwrap_or_default();
-        if nudges.is_empty() { continue; }
+        if nudges.is_empty() {
+            continue;
+        }
         let formatted = nudge_format_for_injection(&nudges);
         injections.insert(*session_id, formatted);
     }

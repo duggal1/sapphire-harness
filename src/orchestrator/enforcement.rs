@@ -5,6 +5,18 @@ use crate::model::{SessionRole, SessionState};
 
 use super::{ActiveSession, PendingSupervisorDecision, SupervisorDecisionKind};
 
+mod antiloop;
+mod autonomy;
+mod evidence;
+
+pub use antiloop::{StatusSignature, compute_status_signature, note_status_signature};
+pub use autonomy::{
+    AutonomousDecision, PromptKind, autonomous_resolution, mark_autonomous_action,
+    should_attempt_autonomous_resolution,
+};
+#[allow(unused_imports)]
+pub use evidence::evidence_missing_for_done_claim;
+
 const INITIAL_REPORT_OUTPUT_CHUNKS: usize = 4;
 const FOLLOW_UP_REPORT_OUTPUT_CHUNKS: usize = 12;
 const FOLLOW_UP_REPORT_SILENCE: Duration = Duration::from_secs(75);
@@ -32,10 +44,7 @@ pub fn canonicalize_worker_state(
     }
 }
 
-pub fn status_summary(
-    report_kind: ReportBackKind,
-    worker_name: &str,
-) -> String {
+pub fn status_summary(report_kind: ReportBackKind, worker_name: &str) -> String {
     match report_kind {
         ReportBackKind::Initial => {
             format!("{worker_name} owes the first Sapphire status update.")
@@ -46,10 +55,7 @@ pub fn status_summary(
     }
 }
 
-pub fn status_reason(
-    report_kind: ReportBackKind,
-    worker_name: &str,
-) -> String {
+pub fn status_reason(report_kind: ReportBackKind, worker_name: &str) -> String {
     match report_kind {
         ReportBackKind::Initial => format!(
             "Worker {worker_name} has started output but still has not sent the mandatory first Sapphire status. Require one concise status update now with exact scope, current action, and blocker or next step."
@@ -60,10 +66,7 @@ pub fn status_reason(
     }
 }
 
-pub fn pending_report_back(
-    session: &ActiveSession,
-    now: Instant,
-) -> Option<ReportBackKind> {
+pub fn pending_report_back(session: &ActiveSession, now: Instant) -> Option<ReportBackKind> {
     if session.record.role != SessionRole::Worker || session.state.is_terminal() {
         return None;
     }
@@ -80,8 +83,9 @@ pub fn pending_report_back(
     }
 
     let last_status = session.last_status_update_at?;
-    let chunks_since_last_status =
-        session.output_chunks.saturating_sub(session.output_chunks_at_last_status);
+    let chunks_since_last_status = session
+        .output_chunks
+        .saturating_sub(session.output_chunks_at_last_status);
 
     if chunks_since_last_status >= FOLLOW_UP_REPORT_OUTPUT_CHUNKS
         && now.duration_since(last_status) >= FOLLOW_UP_REPORT_SILENCE
@@ -100,9 +104,7 @@ pub fn note_status_report(session: &mut ActiveSession, now: Instant) {
 }
 
 pub fn meaningful_overlap_detail(overlap: Option<&str>) -> Option<String> {
-    let normalized = overlap
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let normalized = overlap.map(str::trim).filter(|value| !value.is_empty())?;
     let lowered = normalized.to_ascii_lowercase();
     let benign_prefixes = [
         "none",
@@ -123,10 +125,7 @@ pub fn meaningful_overlap_detail(overlap: Option<&str>) -> Option<String> {
     }
 }
 
-pub fn action_resolves_decision(
-    kind: SupervisorDecisionKind,
-    action_name: &str,
-) -> bool {
+pub fn action_resolves_decision(kind: SupervisorDecisionKind, action_name: &str) -> bool {
     let action = action_name.trim().to_ascii_lowercase();
     match kind {
         SupervisorDecisionKind::Validation => {
@@ -137,7 +136,15 @@ pub fn action_resolves_decision(
             "retry_worker" | "redirect_worker" | "message_worker" | "accept_worker" | "fail_worker"
         ),
         SupervisorDecisionKind::LowConfidenceRecovery => {
-            matches!(action.as_str(), "accept_worker" | "fail_worker")
+            matches!(
+                action.as_str(),
+                "message_worker"
+                    | "retry_worker"
+                    | "redirect_worker"
+                    | "validate_worker"
+                    | "accept_worker"
+                    | "fail_worker"
+            )
         }
         SupervisorDecisionKind::OverlapRecovery => matches!(
             action.as_str(),
@@ -163,10 +170,7 @@ pub fn should_follow_up_pending_decision(
         && now.duration_since(pending.last_notified_at) >= SUPERVISOR_FOLLOW_UP_INTERVAL
 }
 
-pub fn mark_pending_decision_notified(
-    pending: &mut PendingSupervisorDecision,
-    now: Instant,
-) {
+pub fn mark_pending_decision_notified(pending: &mut PendingSupervisorDecision, now: Instant) {
     pending.last_notified_at = now;
     pending.notice_count = pending.notice_count.saturating_add(1);
 }

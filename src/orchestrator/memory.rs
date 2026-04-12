@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{coordination, hidden_workers_state_dir, write_string_to_file, ActiveSession, ControlSurface, PendingMail};
+use super::{ActiveSession, ControlSurface, PendingMail, coordination, write_string_to_file};
 
 #[derive(Debug, Clone)]
 pub struct MemorySummary {
@@ -44,7 +44,6 @@ pub fn write_agent_memories(
     active_sessions: &HashMap<Uuid, ActiveSession>,
     pending_mail: &HashMap<Uuid, PendingMail>,
 ) -> Result<Vec<MemorySummary>> {
-    let hidden_workers_dir = hidden_workers_state_dir(control_surface);
     let mut summaries = Vec::new();
 
     for session in active_sessions.values() {
@@ -86,7 +85,12 @@ pub fn write_agent_memories(
             })
             .take(8)
             .collect::<Vec<_>>();
-        let recent_risks = session.last_risks.iter().take(8).cloned().collect::<Vec<_>>();
+        let recent_risks = session
+            .last_risks
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
         let artifact = AgentMemoryArtifact {
             display_name: session.record.name.clone(),
             role_type: role_type.clone(),
@@ -112,11 +116,7 @@ pub fn write_agent_memories(
             .workers_state_dir
             .join(&session.record.name)
             .join("memory.json");
-        let hidden = hidden_workers_dir
-            .join(&session.record.name)
-            .join("memory.json");
         write_string_to_file(&primary, &rendered)?;
-        write_string_to_file(&hidden, &rendered)?;
 
         summaries.push(MemorySummary {
             display_name: session.record.name.clone(),

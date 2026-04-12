@@ -1,4 +1,4 @@
-use crate::orchestrator::{coordination, ActiveSession};
+use crate::orchestrator::{ActiveSession, coordination};
 use crate::protocol::MailDirective;
 
 use super::types::normalize_message_type;

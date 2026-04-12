@@ -10,17 +10,17 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::contract::validate_team_mail;
+use super::nudge_queue::nudge_enqueue;
+use super::render::*;
+use super::scavenge::{ClaimResult, attempt_scavenge_claim, release_scavenge};
+use super::types::*;
 use crate::model::MailRecord;
 use crate::orchestrator::communication_policy;
-use crate::protocol::{AckDirective, MailDirective};
-use crate::store::Store;
 use crate::orchestrator::coordination;
 use crate::orchestrator::{ActiveSession, LeaseOwner};
-use super::types::*;
-use super::contract::validate_team_mail;
-use super::render::*;
-use super::nudge_queue::nudge_enqueue;
-use super::scavenge::{attempt_scavenge_claim, release_scavenge, ClaimResult};
+use crate::protocol::{AckDirective, MailDirective};
+use crate::store::Store;
 
 // Re-export the orchestrator's PendingMail to avoid duplication
 pub use super::PendingMail;
@@ -35,10 +35,7 @@ fn handle_claim_or_release(
     _alias_map: &HashMap<String, Uuid>,
 ) -> Result<MailHandlingResult> {
     // Parse mail_id from subject or body to find the scavenge mail to claim/release
-    let scavenge_id = directive
-        .mail_id
-        .as_deref()
-        .and_then(parse_mail_id);
+    let scavenge_id = directive.mail_id.as_deref().and_then(parse_mail_id);
 
     let Some(mail_id) = scavenge_id else {
         if let Some(sender) = active_sessions.get(&sender_session_id) {
@@ -46,7 +43,9 @@ fn handle_claim_or_release(
                 "SAPPHIRE_MAIL claim/release requires mail_id set to the scavenge message ID.",
             );
         }
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     };
 
     let sender_name = active_sessions
@@ -59,7 +58,9 @@ fn handle_claim_or_release(
         match attempt_scavenge_claim(store, mail_id, sender_session_id, &sender_name)? {
             ClaimResult::Claimed => {
                 store.append_summary(
-                    mission_id, Some(sender_session_id), "scavenge_claimed",
+                    mission_id,
+                    Some(sender_session_id),
+                    "scavenge_claimed",
                     &format!("{} claimed scavenge: {}", sender_name, directive.subject),
                 )?;
                 if let Some(sender) = active_sessions.get(&sender_session_id) {
@@ -69,7 +70,10 @@ fn handle_claim_or_release(
                     ));
                 }
             }
-            ClaimResult::AlreadyClaimed { claimed_by, claimed_at } => {
+            ClaimResult::AlreadyClaimed {
+                claimed_by,
+                claimed_at,
+            } => {
                 if let Some(sender) = active_sessions.get(&sender_session_id) {
                     let _ = sender.runtime.send_prompt(&format!(
                         "Scavenge already claimed by {} at {}. Pick another task or wait.",
@@ -90,7 +94,9 @@ fn handle_claim_or_release(
         let released = release_scavenge(store, mail_id, sender_session_id)?;
         if released {
             store.append_summary(
-                mission_id, Some(sender_session_id), "scavenge_released",
+                mission_id,
+                Some(sender_session_id),
+                "scavenge_released",
                 &format!("{} released scavenge: {}", sender_name, directive.subject),
             )?;
             if let Some(sender) = active_sessions.get(&sender_session_id) {
@@ -108,7 +114,9 @@ fn handle_claim_or_release(
         }
     }
 
-    Ok(MailHandlingResult { supervisor_notice: None })
+    Ok(MailHandlingResult {
+        supervisor_notice: None,
+    })
 }
 
 /// Handle SAPPHIRE_MAIL directive — route, persist, inject, track ack.
@@ -132,15 +140,21 @@ pub fn handle_mail_directive(
                 "Your SAPPHIRE_MAIL target did not resolve to a known session alias. Use the display name such as Engineer-2 or Supervisor.",
             );
         }
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     };
 
     // Claim/release handling — special message types that modify scavenge mail
     let raw_type = directive.message_type.to_lowercase();
     if raw_type == "claim" || raw_type == "release" {
         return handle_claim_or_release(
-            store, mission_id, sender_session_id, &directive,
-            active_sessions, alias_map,
+            store,
+            mission_id,
+            sender_session_id,
+            &directive,
+            active_sessions,
+            alias_map,
         );
     }
 
@@ -149,13 +163,18 @@ pub fn handle_mail_directive(
         if let Some(sender) = active_sessions.get(&sender_session_id) {
             let _ = sender.runtime.send_prompt(&error);
         }
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     }
 
     // Normalize message type and delivery mode
     let normalized_type = normalize_message_type(&directive.message_type);
     let delivery_mode = derive_delivery_mode(&directive.priority, &directive.delivery_mode);
-    let is_urgent = matches!(directive.priority.to_lowercase().as_str(), "urgent" | "critical");
+    let is_urgent = matches!(
+        directive.priority.to_lowercase().as_str(),
+        "urgent" | "critical"
+    );
     let ack_required = requires_ack(normalized_type, &directive.priority, directive.requires_ack);
 
     // Escalation auto-CCs supervisor
@@ -166,7 +185,10 @@ pub fn handle_mail_directive(
         .filter(|id| *id != sender_session_id && *id != recipient_session_id)
         .collect();
 
-    if normalized_type == "escalation" && !cc_session_ids.contains(&supervisor_id) && sender_session_id != supervisor_id {
+    if normalized_type == "escalation"
+        && !cc_session_ids.contains(&supervisor_id)
+        && sender_session_id != supervisor_id
+    {
         cc_session_ids.push(supervisor_id);
     }
 
@@ -198,28 +220,32 @@ pub fn handle_mail_directive(
         .map(|s| s.record.name.clone())
         .unwrap_or_else(|| directive.to.clone());
     let Some(sender_session) = active_sessions.get(&sender_session_id) else {
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     };
     let Some(recipient_session) = active_sessions.get(&recipient_session_id) else {
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     };
     if let Some(error) = validate_team_mail(sender_session, recipient_session, &directive) {
         if let Some(sender) = active_sessions.get(&sender_session_id) {
             let _ = sender.runtime.send_prompt(&error);
         }
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     }
-    let governance = coordination::govern_mail(
-        sender_session,
-        recipient_session,
-        &directive,
-        pending_mail,
-    );
+    let governance =
+        coordination::govern_mail(sender_session, recipient_session, &directive, pending_mail);
     if let Some(reason) = governance.block_reason.as_deref() {
         if let Some(sender) = active_sessions.get(&sender_session_id) {
             let _ = sender.runtime.send_prompt(reason);
         }
-        return Ok(MailHandlingResult { supervisor_notice: None });
+        return Ok(MailHandlingResult {
+            supervisor_notice: None,
+        });
     }
 
     // Persist to SQLite
@@ -232,8 +258,16 @@ pub fn handle_mail_directive(
         priority: directive.priority.clone(),
         delivery_mode: delivery_mode.to_owned(),
         subject: directive.subject.clone(),
-        status: if ack_required { "awaiting_ack".to_owned() } else { "routed".to_owned() },
-        ack_state: if ack_required { "pending".to_owned() } else { "not_required".to_owned() },
+        status: if ack_required {
+            "awaiting_ack".to_owned()
+        } else {
+            "routed".to_owned()
+        },
+        ack_state: if ack_required {
+            "pending".to_owned()
+        } else {
+            "not_required".to_owned()
+        },
         pinned: directive.pinned,
         body_json: serde_json::to_string(&json!({
             "mail_id": message_id,
@@ -268,7 +302,12 @@ pub fn handle_mail_directive(
         "mail_sent",
         format!(
             "to={} type={} priority={} mode={} subject={} thread={}",
-            recipient_name, normalized_type, directive.priority, delivery_mode, directive.subject, thread_id
+            recipient_name,
+            normalized_type,
+            directive.priority,
+            delivery_mode,
+            directive.subject,
+            thread_id
         ),
     )?;
 
@@ -306,8 +345,13 @@ pub fn handle_mail_directive(
         if delivery_mode == "interrupt" {
             // Direct PTY injection — only for urgent/critical priority
             let mail_prompt = render_mail_for_delivery(
-                message_id, &thread_id, &sender_name, &directive,
-                &cc_session_ids, ack_required, is_urgent,
+                message_id,
+                &thread_id,
+                &sender_name,
+                &directive,
+                &cc_session_ids,
+                ack_required,
+                is_urgent,
             );
             let _ = recipient.runtime.send_prompt(&mail_prompt);
         } else {
@@ -317,12 +361,19 @@ pub fn handle_mail_directive(
                 if communication_policy::MAIL_QUEUE_DIRECT_FALLBACK {
                     tracing::error!("nudge enqueue failed, falling back to direct injection: {e}");
                     let mail_prompt = render_mail_for_delivery(
-                        message_id, &thread_id, &sender_name, &directive,
-                        &cc_session_ids, ack_required, is_urgent,
+                        message_id,
+                        &thread_id,
+                        &sender_name,
+                        &directive,
+                        &cc_session_ids,
+                        ack_required,
+                        is_urgent,
                     );
                     let _ = recipient.runtime.send_prompt(&mail_prompt);
                 } else {
-                    tracing::error!("nudge enqueue failed; direct injection disabled by policy: {e}");
+                    tracing::error!(
+                        "nudge enqueue failed; direct injection disabled by policy: {e}"
+                    );
                 }
             }
         }
@@ -367,13 +418,27 @@ pub fn handle_mail_directive(
     }
 
     // Supervisor notice for inter-worker mail
-    let supervisor_notice = if sender_session_id != supervisor_id && recipient_session_id != supervisor_id && !directive.suppress_notify {
-        let event_type = if is_urgent { SupervisorEventType::Blocked } else { SupervisorEventType::Notice };
-        Some((event_type, format!(
-            "{}Mail routed from {} to {} [{}]: {} (thread: {})",
-            if is_urgent { "⚡URGENT⚡ " } else { "" },
-            sender_name, recipient_name, normalized_type, directive.subject, thread_id
-        )))
+    let supervisor_notice = if sender_session_id != supervisor_id
+        && recipient_session_id != supervisor_id
+        && !directive.suppress_notify
+    {
+        let event_type = if is_urgent {
+            SupervisorEventType::Blocked
+        } else {
+            SupervisorEventType::Notice
+        };
+        Some((
+            event_type,
+            format!(
+                "{}Mail routed from {} to {} [{}]: {} (thread: {})",
+                if is_urgent { "⚡URGENT⚡ " } else { "" },
+                sender_name,
+                recipient_name,
+                normalized_type,
+                directive.subject,
+                thread_id
+            ),
+        ))
     } else {
         None
     };
@@ -536,7 +601,11 @@ pub fn handle_lease_directive(
         store.upsert_lease(&lease_record)?;
 
         if directive.status.eq_ignore_ascii_case("release") {
-            if leases.get(&normalized).map(|o| o.session_id == session_id).unwrap_or(false) {
+            if leases
+                .get(&normalized)
+                .map(|o| o.session_id == session_id)
+                .unwrap_or(false)
+            {
                 leases.remove(&normalized);
             }
             continue;

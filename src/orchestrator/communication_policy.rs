@@ -1,7 +1,7 @@
 pub const WATCHDOG_PROTOCOL_REMINDERS: bool = false;
 pub const MAIL_TIMEOUT_DIRECT_PROMPTS: bool = false;
 pub const MAIL_QUEUE_DIRECT_FALLBACK: bool = false;
-pub const SUPERVISOR_HEALTH_PROBES: bool = false;
+pub const SUPERVISOR_HEALTH_PROBES: bool = true;
 
 pub fn supervisor_enforcement_rules() -> &'static str {
     "- Supervisor owns challenge, redirect, retry, and validation prompts. The watchdog should escalate evidence, not spray worker prompts.\n\

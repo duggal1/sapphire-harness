@@ -33,7 +33,7 @@ pub fn should_break_run(
     active_sessions: &HashMap<Uuid, ActiveSession>,
     active_supervisor_id: Uuid,
     final_synthesis_requested: bool,
-    supervisor_mode: SupervisorMode,
+    _supervisor_mode: SupervisorMode,
 ) -> bool {
     let workers_terminal = workers_are_terminal(active_sessions);
     let everyone_exited = everyone_exited(active_sessions);
@@ -43,6 +43,5 @@ pub fn should_break_run(
 
     workers_terminal
         && final_synthesis_requested
-        && (cleanup_authorized(active_sessions, active_supervisor_id)
-            || supervisor_mode == SupervisorMode::Degraded)
+        && cleanup_authorized(active_sessions, active_supervisor_id)
 }
