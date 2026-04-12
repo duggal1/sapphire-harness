@@ -238,7 +238,12 @@ fn init_tracing(action: &CliAction) {
         CliAction::NoSupervisorLaunch(_) => false,
         _ => false,
     };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let default_filter = match action {
+        CliAction::Run(_) | CliAction::Resume(_) | CliAction::NoSupervisorLaunch(_) => "warn",
+        _ => "warn",
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

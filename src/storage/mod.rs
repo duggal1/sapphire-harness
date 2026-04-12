@@ -568,7 +568,10 @@ mod persistence_tests {
         store.persist_session(&session, Some(&packet)).unwrap();
         let workers = store.load_workers(mission_id).unwrap();
         assert_eq!(workers.len(), 1);
-        assert_eq!(workers[0].packet.as_ref().unwrap().display_name, "Engineer-1");
+        assert_eq!(
+            workers[0].packet.as_ref().unwrap().display_name,
+            "Engineer-1"
+        );
     }
 
     #[test]
@@ -736,7 +739,12 @@ mod persistence_tests {
             .unwrap();
         let supervisor_id = Uuid::new_v4();
         store
-            .append_summary(mission_id, Some(supervisor_id), "supervisor_action", "All done.")
+            .append_summary(
+                mission_id,
+                Some(supervisor_id),
+                "supervisor_action",
+                "All done.",
+            )
             .unwrap();
         let summary = store.latest_supervisor_summary(mission_id).unwrap();
         assert!(summary.is_some());

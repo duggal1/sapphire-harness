@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::cli::NoSupervisorLaunchConfig;
+use crate::internal::ui::theme::{ansi, unicode::Symbol};
 use crate::runtime::SessionRuntime;
 use crate::tmux::Tmux;
 
@@ -66,7 +67,7 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
     dispatch_prompts_parallel(&prompt_targets).await?;
 
     tokio::time::sleep(Duration::from_millis(350)).await;
-    open_ghostty_batch_tabs_if_supported(&tmux, &session_names);
+    open_external_terminals(&tmux, &session_names)?;
 
     Ok(render_summary(&config, &session_names))
 }
@@ -84,22 +85,76 @@ fn ns_runtime_root(config: &NoSupervisorLaunchConfig) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn open_ghostty_batch_tabs_if_supported(tmux: &Tmux, session_names: &[String]) {
-    let _ = tmux.open_ghostty_batch_tabs(session_names);
+fn open_external_terminals(tmux: &Tmux, session_names: &[String]) -> Result<()> {
+    if session_names.is_empty() {
+        return Ok(());
+    }
+
+    tmux.open_ghostty_batch_tabs(session_names)
+        .map_err(anyhow::Error::msg)
+        .context("failed to open Ghostty tabs for `sp ns`")
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_ghostty_batch_tabs_if_supported(_tmux: &Tmux, _session_names: &[String]) {}
+fn open_external_terminals(_tmux: &Tmux, _session_names: &[String]) -> Result<()> {
+    Ok(())
+}
 
 fn render_summary(config: &NoSupervisorLaunchConfig, session_names: &[String]) -> String {
-    format!(
-        "launched {} {} terminal(s) without a supervisor\nrepo: {}\nsession base: {}\ntmux session(s): {}",
-        config.count,
-        config.agent.as_str(),
-        config.repo.display(),
-        config.session_name,
-        session_names.join(", ")
-    )
+    let repo_name = config
+        .repo
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    let width = summary_width();
+    let rule = ansi::rule(&"─".repeat(width));
+    let details = [
+        format!(
+            "{} {}",
+            ansi::brand_bold("agent"),
+            ansi::text(&format!("{} × {}", config.agent.as_str(), config.count))
+        ),
+        format!("{} {}", ansi::brand_bold("repo"), ansi::text(repo_name)),
+        format!(
+            "{} {}",
+            ansi::brand_bold("tmux"),
+            ansi::muted(&session_names.join(", "))
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push(format!("  {rule}"));
+    lines.push(format!(
+        "  {} {}",
+        ansi::success_bold(Symbol::Success.as_str()),
+        ansi::text_bold("No-supervisor launch ready")
+    ));
+    for line in details {
+        lines.push(format!("  {line}"));
+    }
+    lines.push(format!("  {rule}"));
+    lines.join("\n")
+}
+
+fn summary_width() -> usize {
+    terminal_width()
+        .map(|width| width.saturating_sub(10).clamp(36, 72))
+        .unwrap_or(56)
+}
+
+fn terminal_width() -> Option<usize> {
+    let output = std::process::Command::new("tput")
+        .arg("cols")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .ok()
 }
 
 async fn dispatch_prompts_parallel(prompt_targets: &[(String, String)]) -> Result<()> {

@@ -11,7 +11,6 @@ use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::info;
 use uuid::Uuid;
 
 use crate::tmux::{PaneState, Tmux};
@@ -311,7 +310,7 @@ impl TmuxBackend {
             let pane = handle.pane_id.clone();
             thread::spawn(move || {
                 thread::sleep(delay);
-                info!(
+                tracing::debug!(
                     worker = %label,
                     pane = %pane,
                     delay_ms = delay.as_millis(),
@@ -387,7 +386,7 @@ impl SessionHandle for TmuxSessionHandle {
     }
 
     fn send_text(&self, text: &str) -> Result<()> {
-        info!(
+        tracing::debug!(
             pane = %self.pane_id,
             worker = %self.display_name,
             bytes = text.len(),
@@ -401,7 +400,7 @@ impl SessionHandle for TmuxSessionHandle {
 
     fn send_prompt(&self, text: &str) -> Result<()> {
         let body = text.trim_end_matches(['\r', '\n']);
-        info!(
+        tracing::debug!(
             pane = %self.pane_id,
             worker = %self.display_name,
             bytes = body.len(),
@@ -452,7 +451,7 @@ impl SessionHandle for PtySessionHandle {
     }
 
     fn send_text(&self, text: &str) -> Result<()> {
-        info!(
+        tracing::debug!(
             session = %self.session_id,
             worker = %self.display_name,
             bytes = text.len(),
@@ -468,7 +467,7 @@ impl SessionHandle for PtySessionHandle {
     }
 
     fn send_prompt(&self, text: &str) -> Result<()> {
-        info!(
+        tracing::debug!(
             session = %self.session_id,
             worker = %self.display_name,
             bytes = text.len(),

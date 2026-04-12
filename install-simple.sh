@@ -9,12 +9,12 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     BOLD=$'\033[1m'
     DIM=$'\033[2m'
     RESET=$'\033[0m'
-    FG=$'\033[38;2;244;241;255m'
-    MUTED=$'\033[38;2;156;149;179m'
+    FG=$'\033[38;2;248;245;255m'
+    MUTED=$'\033[38;2;170;163;191m'
     BORDER=$'\033[38;2;86;79;111m'
-    PURPLE=$'\033[38;2;191;104;255m'
-    PURPLE_BRIGHT=$'\033[38;2;234;213;255m'
-    GREEN=$'\033[38;2;122;230;156m'
+    PURPLE=$'\033[38;2;212;128;255m'
+    PURPLE_BRIGHT=$'\033[38;2;242;226;255m'
+    GREEN=$'\033[38;2;144;244;178m'
     YELLOW=$'\033[38;2;244;189;102m'
     RED=$'\033[38;2;255;136;170m'
 else
@@ -59,6 +59,25 @@ fit_text() {
         printf "%s" "$text"
     else
         printf "%s" "${text:0:$((width - 3))}..."
+    fi
+}
+
+init_box_width() {
+    local cols="${COLUMNS:-}"
+    if [ -z "$cols" ] && command -v tput >/dev/null 2>&1; then
+        cols=$(tput cols 2>/dev/null || true)
+    fi
+    if [ -z "$cols" ]; then
+        cols=80
+    fi
+
+    if [ "$cols" -lt 54 ]; then
+        BOX_WIDTH=46
+    else
+        BOX_WIDTH=$((cols - 8))
+        if [ "$BOX_WIDTH" -gt 72 ]; then
+            BOX_WIDTH=72
+        fi
     fi
 }
 
@@ -170,6 +189,7 @@ check_prereqs() {
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY="$INSTALL_DIR/sp"
 
+init_box_width
 print_banner
 print_capabilities
 
@@ -211,7 +231,8 @@ if [ -f "$BINARY" ] && [ -x "$BINARY" ]; then
     print_box_border
     printf "${BORDER}│ ${PURPLE_BRIGHT}${BOLD}%-*s${RESET} ${BORDER}│${RESET}\n" "$BOX_WIDTH" "Quick start"
     print_empty_box_line
-    print_box_line "sp qwen 2 --repo . --mission \"debug and validate the repo\""
+    print_box_line "sp claude 2 \"debug and validate the repo\""
+    print_box_line "sp ns claude 3 \"prompt 1\" \"prompt 2\" \"prompt 3\""
     print_box_line "sp status"
     print_box_line "sp --help"
     print_box_footer

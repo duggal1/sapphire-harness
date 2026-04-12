@@ -365,13 +365,13 @@ impl Tmux {
     pub fn open_external_terminal_for_session(&self, session: &str) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            // VS Code terminal: open Ghostty window directly (no AppleScript needed)
+            // VS Code terminal: route tmux sessions into Ghostty using the same tab-only policy.
             if terminal_program() == Some("vscode") {
                 if ghostty_app_path().is_some() {
-                    self.open_ghostty_window_for_session(session)
+                    self.open_ghostty_batch_tabs(&[session.to_owned()])
                         .map_err(|error| {
                             format!(
-                                "failed to open Ghostty window for tmux session {session}: {error}"
+                                "failed to open Ghostty tab for tmux session {session}: {error}"
                             )
                         })?;
                     return Ok(());
@@ -379,42 +379,16 @@ impl Tmux {
                 // Ghostty not installed — fall through to Apple Terminal
             }
 
-            // Ghostty terminal: try tab first, fall back to new window
+            // Ghostty terminal: stay tab-only; never create a new Ghostty window here.
             if terminal_program() == Some("ghostty") {
-                if let Err(error) = self.open_ghostty_tab_for_session(session) {
-                    self.open_ghostty_window_for_session(session)
-                        .map_err(|fallback_error| {
-                            format!(
-                                "failed to open Ghostty tab ({error}); fallback Ghostty window failed ({fallback_error})"
-                            )
-                        })?;
-                }
+                self.open_ghostty_batch_tabs(&[session.to_owned()])
+                    .map_err(|error| {
+                        format!("failed to open Ghostty tab for tmux session {session}: {error}")
+                    })?;
                 return Ok(());
             }
 
-            // Fallback: Apple Terminal.app via AppleScript
-            let command = format!("tmux attach-session -t {}", shell_quote(session));
-            // Small delay to ensure tmux session is fully ready
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let status = Command::new("/usr/bin/osascript")
-                .args([
-                    "-e",
-                    "tell application \"Terminal\" to activate",
-                    "-e",
-                    &format!(
-                        "tell application \"Terminal\" to do script \"{}\"",
-                        applescript_escape(&command)
-                    ),
-                ])
-                .status()
-                .map_err(|e| e.to_string())?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "failed to open external Terminal.app window for tmux session {session}"
-                ))
-            }
+            self.open_terminal_app_for_session(session)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -424,74 +398,39 @@ impl Tmux {
     }
 
     #[cfg(target_os = "macos")]
+    pub fn open_terminal_app_for_session(&self, session: &str) -> Result<(), String> {
+        let command = format!("tmux attach-session -t {}", shell_quote(session));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let status = Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "tell application \"Terminal\" to activate",
+                "-e",
+                &format!(
+                    "tell application \"Terminal\" to do script \"{}\"",
+                    applescript_escape(&command)
+                ),
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "failed to open external Terminal.app window for tmux session {session}"
+            ))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn open_ghostty_tab_for_session(&self, session: &str) -> Result<(), String> {
         let attach_command = format!("tmux attach-session -t {}", shell_quote(session));
         let script = vec![
-            "tell application \"Ghostty\" to activate".to_owned(),
-            "tell application \"System Events\"".to_owned(),
-            "  keystroke \"t\" using command down".to_owned(),
-            "  delay 0.2".to_owned(),
-            format!("  keystroke \"{}\"", applescript_escape(&attach_command)),
-            "  key code 36".to_owned(),
-            "end tell".to_owned(),
-        ];
-        let mut command = Command::new("/usr/bin/osascript");
-        for line in &script {
-            command.arg("-e").arg(line);
-        }
-        command.spawn().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Open a new Ghostty window running a specific tmux session (proven AppleScript approach).
-    #[cfg(target_os = "macos")]
-    pub fn open_ghostty_window_for_session(&self, session: &str) -> Result<(), String> {
-        let attach_command = format!("tmux attach-session -t {}", shell_quote(session));
-        let script = vec![
             "tell application \"Ghostty\"".to_owned(),
             "    activate".to_owned(),
-            "    set win to new window".to_owned(),
-            "    delay 0.3".to_owned(),
-            "    set term to focused terminal of selected tab of win".to_owned(),
-            format!(
-                "    input text (\"{}\\n\") to term",
-                applescript_escape(&attach_command)
-            ),
-            "end tell".to_owned(),
-        ];
-        let mut command = Command::new("/usr/bin/osascript");
-        for line in &script {
-            command.arg("-e").arg(line);
-        }
-        match command.spawn() {
-            Ok(_) => {
-                tracing::info!(
-                    "requested Ghostty window for tmux session '{}' via AppleScript",
-                    session
-                );
-                Ok(())
-            }
-            Err(error) => self
-                .open_ghostty_window_fallback(session)
-                .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}")),
-        }
-    }
-
-    /// Open a new Ghostty tab in the existing window running a specific tmux session.
-    /// Uses proven AppleScript approach from launch-codex-tabs.sh.
-    #[cfg(target_os = "macos")]
-    pub fn open_ghostty_tab_for_session_applescript(&self, session: &str) -> Result<(), String> {
-        let attach_command = format!("tmux attach-session -t {}", shell_quote(session));
-        let script = vec![
-            "tell application \"Ghostty\"".to_owned(),
-            "    activate".to_owned(),
-            "    if (count of windows) is 0 then".to_owned(),
-            "        set win to new window".to_owned(),
-            "    else".to_owned(),
-            "        set win to front window".to_owned(),
-            "    end if".to_owned(),
+            "    set win to front window".to_owned(),
             "    set t to new tab in win".to_owned(),
-            "    delay 0.3".to_owned(),
+            "    delay 0.2".to_owned(),
             "    select tab t".to_owned(),
             "    delay 0.1".to_owned(),
             "    set term to focused terminal of selected tab of win".to_owned(),
@@ -505,80 +444,146 @@ impl Tmux {
         for line in &script {
             command.arg("-e").arg(line);
         }
-        command.spawn().map_err(|e| e.to_string())?;
-        tracing::info!(
-            "requested Ghostty tab for tmux session '{}' via AppleScript",
-            session
-        );
+        let output = command.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "Ghostty refused direct tab creation for tmux session {session}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
         Ok(())
     }
 
-    /// Open Ghostty tabs for multiple tmux sessions (from launch-codex-tabs.sh pattern).
-    /// First session opens a new window, subsequent sessions open tabs in that window.
+    #[cfg(target_os = "macos")]
+    fn send_ghostty_attach_to_current_tab(&self, session: &str) -> Result<(), String> {
+        let attach_command = format!("tmux attach-session -t {}", shell_quote(session));
+        let script = vec![
+            "tell application \"Ghostty\"".to_owned(),
+            "    activate".to_owned(),
+            "    set win to front window".to_owned(),
+            "    delay 0.2".to_owned(),
+            "    set term to focused terminal of selected tab of win".to_owned(),
+            format!(
+                "    input text (\"{}\\n\") to term",
+                applescript_escape(&attach_command)
+            ),
+            "end tell".to_owned(),
+        ];
+        let mut command = Command::new("/usr/bin/osascript");
+        for line in &script {
+            command.arg("-e").arg(line);
+        }
+        let output = command.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "Ghostty refused current-tab attach for tmux session {session}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn activate_ghostty(&self) -> Result<(), String> {
+        let mut command = Command::new("/usr/bin/osascript");
+        command
+            .arg("-e")
+            .arg("tell application \"Ghostty\" to activate");
+        let status = command.status().map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("failed to activate Ghostty".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ghostty_window_count(&self) -> Result<usize, String> {
+        let script = concat!(
+            "if application \"Ghostty\" is running then\n",
+            "  tell application \"Ghostty\" to return count of windows\n",
+            "else\n",
+            "  return 0\n",
+            "end if"
+        );
+        let output = Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<usize>()
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn launch_ghostty_app(&self) -> Result<(), String> {
+        let ghostty_app = ghostty_app_path()
+            .ok_or_else(|| "Ghostty.app was not found in /Applications".to_owned())?;
+        let status = Command::new("open")
+            .args(["-a", &ghostty_app])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("failed to launch Ghostty".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ensure_ghostty_front_window(&self) -> Result<bool, String> {
+        let had_window = self.ghostty_window_count()? > 0;
+        if !had_window {
+            self.launch_ghostty_app()?;
+        }
+        self.activate_ghostty()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if self.ghostty_window_count()? > 0 {
+                return Ok(had_window);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        Err("Ghostty did not expose a front window in time".to_owned())
+    }
+
     #[cfg(target_os = "macos")]
     pub fn open_ghostty_batch_tabs(&self, session_names: &[String]) -> Result<(), String> {
         if session_names.is_empty() {
             return Ok(());
         }
 
-        // First session: open new window
-        if let Err(e) = self.open_ghostty_window_for_session(&session_names[0]) {
-            tracing::warn!(
-                "failed to open first Ghostty window, trying fallback: {}",
-                e
-            );
+        let had_window = self.ensure_ghostty_front_window()?;
+
+        if had_window {
+            for session in session_names {
+                self.open_ghostty_tab_for_session(session)?;
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            return Ok(());
         }
+
+        self.send_ghostty_attach_to_current_tab(&session_names[0])?;
         std::thread::sleep(std::time::Duration::from_millis(250));
 
-        // Subsequent sessions: open tabs
         for session in session_names.iter().skip(1) {
-            if let Err(e) = self.open_ghostty_tab_for_session_applescript(session) {
-                tracing::warn!(
-                    "failed to open Ghostty tab for session '{}', trying fallback: {}",
-                    session,
-                    e
-                );
-                // Fallback to new window
-                if let Err(e) = self.open_ghostty_window_for_session(session) {
-                    tracing::warn!("fallback also failed for session '{}': {}", session, e);
-                }
-            }
+            self.open_ghostty_tab_for_session(session)?;
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
 
         Ok(())
     }
 
-    /// Fallback: use `open -na` to launch Ghostty with a tmux session.
-    #[cfg(target_os = "macos")]
-    fn open_ghostty_window_fallback(&self, session: &str) -> Result<(), String> {
-        let ghostty_app = ghostty_app_path()
-            .ok_or_else(|| "Ghostty.app was not found in /Applications".to_owned())?;
-        let attach_cmd = format!("tmux attach-session -t {}", shell_quote(session));
-        Command::new("open")
-            .args([
-                "-na",
-                &ghostty_app,
-                "--args",
-                "-e",
-                "/bin/zsh",
-                "-lc",
-                &attach_cmd,
-            ])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        tracing::info!(
-            "requested Ghostty window for tmux session '{}' (fallback)",
-            session
-        );
-        Ok(())
-    }
-
     pub fn is_available() -> bool {
         Command::new("tmux")
             .arg("-V")
-            .status()
-            .map(|status| status.success())
+            .output()
+            .map(|output| output.status.success())
             .unwrap_or(false)
     }
 

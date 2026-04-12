@@ -26,12 +26,99 @@ fn shimmer_start() -> &'static Instant {
 }
 
 const LOADING_PHRASES: &[&str] = &[
-    "Updating live state",
-    "Refreshing agent sessions",
-    "Collecting terminal output",
-    "Checking review queue",
-    "Reading mission status",
-    "Syncing control surface",
+    "Discombobulating...",
+    "Recombobulating...",
+    "Boondoggling...",
+    "Flibbertigibbeting...",
+    "Prestidigitating...",
+    "Hullaballooing...",
+    "Tomfoolering...",
+    "Shenaniganing...",
+    "Razzledazzling...",
+    "Fiddlefaddling...",
+    "Skedaddling...",
+    "Canoodling...",
+    "Whatchamacalliting...",
+    "Bebopping...",
+    "Spelunking...",
+    "Gallivanting...",
+    "Osmosing...",
+    "Nebulizing...",
+    "Nucleating...",
+    "Transmuting...",
+    "Caramelizing...",
+    "Fermenting...",
+    "Sockhopping...",
+    "Topsyturvying...",
+    "Wibbling...",
+    "Schlepping...",
+    "Jitterbugging...",
+    "Moonwalking...",
+    "Quantumizing...",
+    "Hyperspacing...",
+    "Smooshing...",
+    "Orbitalizing...",
+    "Galaxifying...",
+    "Supernovaing...",
+    "Wormholing...",
+    "Constellating...",
+    "Cosmifying...",
+    "Quasaring...",
+    "Pulsaring...",
+    "Singularitizing...",
+    "Asteroiding...",
+    "Darkmattering...",
+    "Redshifting...",
+    "Moonquaking...",
+    "Starforging...",
+    "Voidmaxxing...",
+    "Planetizing...",
+    "Celestializing...",
+    "Magnetaring...",
+    "Parallaxing...",
+    "Gravwaving...",
+    "Spectralizing...",
+    "Exoplaneting...",
+    "Cosmoscrutinizing...",
+    "Nebulonizing...",
+    "Blackholing...",
+    "Starglitching...",
+    "Vacuumizing...",
+    "Eclipsifying...",
+    "Lagranging...",
+    "Novafrying...",
+    "Cometizing...",
+    "Peculiarizing...",
+    "Meandering...",
+    "Shapeshifting...",
+    "Mischiefing...",
+    "Goblinizing...",
+    "Gremlining...",
+    "Crypticizing...",
+    "Befuddling...",
+    "Bamboozling...",
+    "Snickering...",
+    "Hijinksing...",
+    "Wonkifying...",
+    "Unhinging...",
+    "Yapping...",
+    "Scampering...",
+    "Frolicking...",
+    "Glitchifying...",
+    "Confounding...",
+    "Warping...",
+    "Fractaling...",
+    "Mutating...",
+    "Thingamabobbing...",
+    "Contraptioning...",
+    "Doodading...",
+    "Kerfuffling...",
+    "Absurdifying...",
+    "Chaosengineering...",
+    "Plasmatizing...",
+    "Hyperventilating...",
+    "Crystallizing...",
+    "Unrealitying...",
 ];
 
 const LOADING_PHRASE_INTERVAL_SECS: u64 = 6;
@@ -112,7 +199,10 @@ fn render_header(
             Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
-        Span::styled(format!("{} ", Symbol::Info), Style::default().fg(status_color)),
+        Span::styled(
+            format!("{} ", Symbol::Info),
+            Style::default().fg(status_color),
+        ),
         Span::styled(
             status.to_ascii_uppercase(),
             Style::default()
@@ -226,10 +316,7 @@ fn render_team(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot, sc
         for agent in &agents {
             let (dot, color) = status_dot(agent.status);
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{dot} "),
-                    Style::default().fg(color),
-                ),
+                Span::styled(format!("{dot} "), Style::default().fg(color)),
                 Span::styled(
                     truncate(&agent.name, 18),
                     Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
@@ -319,10 +406,7 @@ fn render_team(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot, sc
     );
 }
 
-fn render_supervisor_row(
-    supervisor: &AgentNode,
-    workers: &[&AgentNode],
-) -> Line<'static> {
+fn render_supervisor_row(supervisor: &AgentNode, workers: &[&AgentNode]) -> Line<'static> {
     let blocked = workers
         .iter()
         .filter(|worker| matches!(worker.status, AgentStatus::Blocked | AgentStatus::Stalled))
@@ -466,12 +550,10 @@ fn render_control(frame: &mut Frame<'_>, area: Rect, snapshot: &RuntimeSnapshot)
             ),
         ]));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "No supervisor events yet".to_owned(),
-                Style::default().fg(GRAY),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "No supervisor events yet".to_owned(),
+            Style::default().fg(GRAY),
+        )]));
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -590,17 +672,9 @@ fn smoothstep(value: f32) -> f32 {
 
 fn shimmer_color(intensity: f32) -> Color {
     if intensity < 0.72 {
-        blend_rgb(
-            SHIMMER_IDLE_RGB,
-            SHIMMER_BASE_RGB,
-            intensity / 0.72,
-        )
+        blend_rgb(SHIMMER_IDLE_RGB, SHIMMER_BASE_RGB, intensity / 0.72)
     } else {
-        blend_rgb(
-            SHIMMER_BASE_RGB,
-            SHIMMER_HOT_RGB,
-            (intensity - 0.72) / 0.28,
-        )
+        blend_rgb(SHIMMER_BASE_RGB, SHIMMER_HOT_RGB, (intensity - 0.72) / 0.28)
     }
 }
 
