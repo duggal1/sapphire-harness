@@ -5,13 +5,16 @@ use anyhow::{Context, Result};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::agent::AgentKind;
 use crate::cli::NoSupervisorLaunchConfig;
 use crate::internal::ui::theme::{ansi, unicode::Symbol};
-use crate::runtime::SessionRuntime;
+use crate::runtime::{ProcessLaunchSpec, SessionRuntime};
 use crate::tmux::Tmux;
 
 const PANES_PER_SESSION: usize = 10;
-const FAST_PROMPT_DELAY: Duration = Duration::from_millis(1_500);
+const DEFAULT_FAST_PROMPT_DELAY: Duration = Duration::from_millis(1_500);
+const QWEN_FAST_PROMPT_DELAY: Duration = Duration::from_millis(4_500);
+const QWEN_STARTUP_WAKE_DELAY: Duration = Duration::from_millis(1_000);
 const STARTUP_SETTLE_BUFFER: Duration = Duration::from_millis(100);
 const TERMINAL_OPEN_DELAY: Duration = Duration::from_millis(120);
 
@@ -50,7 +53,7 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
                 .agent
                 .build_launch_spec(&config.repo, &runtime_root, &config.worker_args);
         spec.surface_label = format!("{}-{}", config.agent.as_str(), index + 1);
-        apply_fast_ns_profile(&mut spec);
+        apply_fast_ns_profile(config.agent, &mut spec);
         let prompt_delay = spec.prompt_delay;
         let running = runtimes[runtime_index]
             .spawn(Uuid::new_v4(), spec)
@@ -61,6 +64,8 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
         launches.push((running, prompt, prompt_delay));
     }
 
+    let terminal_notice = open_external_terminals(&tmux, &session_names).err();
+
     if let Some(delay) = launches.iter().map(|(_, _, delay)| *delay).max() {
         tokio::time::sleep(delay + STARTUP_SETTLE_BUFFER).await;
     } else {
@@ -70,7 +75,6 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
     dispatch_prompts_parallel(&prompt_targets).await?;
 
     tokio::time::sleep(TERMINAL_OPEN_DELAY).await;
-    let terminal_notice = open_external_terminals(&tmux, &session_names).err();
 
     Ok(render_summary(
         &config,
@@ -79,9 +83,16 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
     ))
 }
 
-fn apply_fast_ns_profile(spec: &mut crate::runtime::ProcessLaunchSpec) {
-    spec.prompt_delay = spec.prompt_delay.min(FAST_PROMPT_DELAY);
-    spec.startup_input = None;
+fn apply_fast_ns_profile(agent: AgentKind, spec: &mut ProcessLaunchSpec) {
+    match agent {
+        AgentKind::Qwen => {
+            spec.prompt_delay = QWEN_FAST_PROMPT_DELAY;
+            spec.startup_input = Some((QWEN_STARTUP_WAKE_DELAY, "\n".to_owned()));
+        }
+        AgentKind::Forge | AgentKind::Codex | AgentKind::Claude => {
+            spec.prompt_delay = spec.prompt_delay.min(DEFAULT_FAST_PROMPT_DELAY);
+        }
+    }
 }
 
 fn ns_runtime_root(config: &NoSupervisorLaunchConfig) -> PathBuf {
