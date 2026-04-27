@@ -401,7 +401,7 @@ impl Tmux {
     pub fn open_terminal_app_for_session(&self, session: &str) -> Result<(), String> {
         let command = format!("tmux attach-session -t {}", shell_quote(session));
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let status = Command::new("/usr/bin/osascript")
+        let output = Command::new("/usr/bin/osascript")
             .args([
                 "-e",
                 "tell application \"Terminal\" to activate",
@@ -411,13 +411,14 @@ impl Tmux {
                     applescript_escape(&command)
                 ),
             ])
-            .status()
+            .output()
             .map_err(|e| e.to_string())?;
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
             Err(format!(
-                "failed to open external Terminal.app window for tmux session {session}"
+                "failed to open external Terminal.app window for tmux session {session}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
             ))
         }
     }
@@ -489,9 +490,12 @@ impl Tmux {
         command
             .arg("-e")
             .arg("tell application \"Ghostty\" to activate");
-        let status = command.status().map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err("failed to activate Ghostty".to_owned());
+        let output = command.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to activate Ghostty: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
         Ok(())
     }

@@ -235,7 +235,7 @@ fn init_tracing(action: &CliAction) {
     let interactive = match action {
         CliAction::Run(config) => !config.dry_run && (config.tmux || config.tui),
         CliAction::Resume(config) => config.tmux || config.tui,
-        CliAction::NoSupervisorLaunch(_) => false,
+        CliAction::NoSupervisorLaunch(_) => true,
         _ => false,
     };
     let default_filter = match action {

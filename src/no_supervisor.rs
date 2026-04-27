@@ -11,7 +11,9 @@ use crate::runtime::SessionRuntime;
 use crate::tmux::Tmux;
 
 const PANES_PER_SESSION: usize = 10;
-const STARTUP_SETTLE_BUFFER: Duration = Duration::from_millis(250);
+const FAST_PROMPT_DELAY: Duration = Duration::from_millis(1_500);
+const STARTUP_SETTLE_BUFFER: Duration = Duration::from_millis(100);
+const TERMINAL_OPEN_DELAY: Duration = Duration::from_millis(120);
 
 pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
     if !Tmux::is_available() {
@@ -48,6 +50,7 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
                 .agent
                 .build_launch_spec(&config.repo, &runtime_root, &config.worker_args);
         spec.surface_label = format!("{}-{}", config.agent.as_str(), index + 1);
+        apply_fast_ns_profile(&mut spec);
         let prompt_delay = spec.prompt_delay;
         let running = runtimes[runtime_index]
             .spawn(Uuid::new_v4(), spec)
@@ -66,10 +69,19 @@ pub async fn launch(config: NoSupervisorLaunchConfig) -> Result<String> {
 
     dispatch_prompts_parallel(&prompt_targets).await?;
 
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    open_external_terminals(&tmux, &session_names)?;
+    tokio::time::sleep(TERMINAL_OPEN_DELAY).await;
+    let terminal_notice = open_external_terminals(&tmux, &session_names).err();
 
-    Ok(render_summary(&config, &session_names))
+    Ok(render_summary(
+        &config,
+        &session_names,
+        terminal_notice.as_ref(),
+    ))
+}
+
+fn apply_fast_ns_profile(spec: &mut crate::runtime::ProcessLaunchSpec) {
+    spec.prompt_delay = spec.prompt_delay.min(FAST_PROMPT_DELAY);
+    spec.startup_input = None;
 }
 
 fn ns_runtime_root(config: &NoSupervisorLaunchConfig) -> PathBuf {
@@ -92,7 +104,7 @@ fn open_external_terminals(tmux: &Tmux, session_names: &[String]) -> Result<()> 
 
     tmux.open_ghostty_batch_tabs(session_names)
         .map_err(anyhow::Error::msg)
-        .context("failed to open Ghostty tabs for `sp ns`")
+        .context("could not auto-open Ghostty tabs")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -100,23 +112,27 @@ fn open_external_terminals(_tmux: &Tmux, _session_names: &[String]) -> Result<()
     Ok(())
 }
 
-fn render_summary(config: &NoSupervisorLaunchConfig, session_names: &[String]) -> String {
+fn render_summary(
+    config: &NoSupervisorLaunchConfig,
+    session_names: &[String],
+    terminal_notice: Option<&anyhow::Error>,
+) -> String {
     let repo_name = config
         .repo
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("repo");
     let width = summary_width();
-    let rule = ansi::rule(&"─".repeat(width));
+    let rule = ansi::rule(&"-".repeat(width));
     let details = [
         format!(
-            "{} {}",
+            "{}  {}",
             ansi::brand_bold("agent"),
             ansi::text(&format!("{} × {}", config.agent.as_str(), config.count))
         ),
-        format!("{} {}", ansi::brand_bold("repo"), ansi::text(repo_name)),
+        format!("{}   {}", ansi::brand_bold("repo"), ansi::text(repo_name)),
         format!(
-            "{} {}",
+            "{}   {}",
             ansi::brand_bold("tmux"),
             ansi::muted(&session_names.join(", "))
         ),
@@ -128,10 +144,17 @@ fn render_summary(config: &NoSupervisorLaunchConfig, session_names: &[String]) -
     lines.push(format!(
         "  {} {}",
         ansi::success_bold(Symbol::Success.as_str()),
-        ansi::text_bold("No-supervisor launch ready")
+        ansi::text_bold("Ready")
     ));
     for line in details {
         lines.push(format!("  {line}"));
+    }
+    if terminal_notice.is_some() {
+        lines.push(format!(
+            "  {} {}",
+            ansi::muted("open"),
+            ansi::text("tmux attach manually if the terminal did not open")
+        ));
     }
     lines.push(format!("  {rule}"));
     lines.join("\n")
